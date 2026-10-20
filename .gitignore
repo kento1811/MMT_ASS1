@@ -1,0 +1,109 @@
+# =========================
+
+# ENVIRONMENT VARIABLES
+
+# =========================
+
+.env
+.env.*
+!.env.example
+ngrok.yml
+
+# =========================
+
+# PYTHON 
+
+# =========================
+
+**pycache**/
+*.py[cod]
+*$py.class
+
+*.so
+.Python
+
+venv/
+.venv/
+ENV/
+env/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# =========================
+
+# IDE
+
+# =========================
+
+.vscode/
+.idea/
+
+# =========================
+
+# OPERATING SYSTEM
+
+# =========================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+
+# LOGS
+
+# =========================
+
+*.log
+logs/
+
+# =========================
+
+# SECRETS
+
+# =========================
+
+*.env
+
+*.pem
+*.key
+*.crt
+
+# =========================
+
+# TEST OUTPUTS
+
+# =========================
+
+coverage/
+coverage.xml
+
+# =========================
+
+# CACHE
+
+# =========================
+
+.cache/
+tmp/
+temp/
+# =========================
+
+
+# =========================
+
+# LOCAL CONFIG
+
+# =========================
+
+*.local
+
