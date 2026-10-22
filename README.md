@@ -33,7 +33,7 @@ MMT_Ass1/
 ├── server/                     # Máy chủ trung tâm (Điều phối & Định tuyến)
 │   ├── __init__.py
 │   ├── main.py                 # Điểm khởi chạy của server (khởi tạo raw socket, loop đa luồng)
-│   ├── config.py               # Cấu hình IP Host, Port, giới hạn client (10-20 concurrent clients)
+│   ├── config.py               # Cấu hình IP Host, Port, giới hạn client (30-40 concurrent clients)
 │   ├── state_manager.py        # Lưu trạng thái: ai đang online, IP và Port hiện tại là gì
 │   ├── router.py               # Logic định tuyến: nhận tin nhắn và chuyển tiếp (forward) đến đúng người nhận
 │   ├── stream_manager.py       # Duy trì số thứ tự (sequence number), xử lý xác nhận (ACK) và truyền lại
