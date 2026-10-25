@@ -1,0 +1,40 @@
+import socket
+from server.config import HOST, PORT
+from server.state_manager import StateManager
+from server.stream_manager import StreamManager
+from server.chat_handler import ChatHandler
+from server.file_handler import FileHandler
+from server.router import Router
+
+def start_server():
+    # 1. Mở trạm bưu điện (Raw UDP Socket)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((HOST, PORT))
+    print(f"🚀 Server khởi chạy thành công tại {HOST}:{PORT}")
+
+    # 2. Lắp ráp các linh kiện (Dependency Injection)
+    state_manager = StateManager()
+    stream_manager = StreamManager(state_manager, sock)
+    
+    chat_handler = ChatHandler(state_manager, stream_manager)
+    file_handler = FileHandler(state_manager, stream_manager)
+    
+    router = Router(stream_manager, chat_handler, file_handler)
+    stream_manager.set_router(router)
+
+    # 3. Vòng lặp Core (I/O) - Chỉ làm duy nhất 1 việc: Đón bưu kiện
+    try:
+        while True:
+            # Nhận nguyên cục raw_data (tối đa 65535 bytes) từ OS
+            raw_data, addr = sock.recvfrom(65535)
+            
+            # Quăng ngay vào cho StreamManager xử lý, không để vòng lặp bị đứng
+            stream_manager.handle_incoming_datagram(raw_data, addr)
+            
+    except KeyboardInterrupt:
+        print("\nĐang tắt Server...")
+    finally:
+        sock.close()
+
+if __name__ == "__main__":
+    start_server()

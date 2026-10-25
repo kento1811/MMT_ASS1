@@ -1,7 +1,7 @@
 
 import struct
-from constants import TCPFlags
-from algorithms import checksum
+from shared.constants import TCPFlags
+from shared.algorithms import checksum
 
 
 class Packet:

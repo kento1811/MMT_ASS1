@@ -5,10 +5,10 @@ import threading
 import time
 from queue import Queue, Empty, Full
 
-from packet import Packet
-from constants import TCPFlags
-from exceptions import ConnectionTimeoutError, ProtocolError
-from algorithms import SlidingWindow
+from shared.packet import Packet
+from shared.constants import TCPFlags
+from shared.exceptions import ConnectionTimeoutError, ProtocolError
+from shared.algorithms import SlidingWindow
 
 
 class PacketService:

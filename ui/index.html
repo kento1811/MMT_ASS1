@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HUDP Collaboration App</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Màn hình Đăng nhập -->
+    <div id="login-screen" class="screen">
+        <div class="login-box">
+            <h2>🌍 HUDP Network</h2>
+            <p>Ứng dụng chat & truyền file phân tán</p>
+            <input type="text" id="username-input" placeholder="Nhập tên đăng nhập của bạn..." autocomplete="off">
+            <button id="login-btn">Vào phòng</button>
+        </div>
+    </div>
+
+    <!-- Màn hình Chat chính -->
+    <div id="chat-screen" class="screen hidden">
+        <div class="sidebar">
+            <h3>📦 Gửi File P2P</h3>
+            <div class="file-form">
+                <input type="text" id="file-target" placeholder="Người nhận (VD: Bob)">
+                <input type="text" id="file-path" placeholder="Đường dẫn file (VD: C:/data.txt)">
+                <button id="send-file-btn">Xin phép Gửi</button>
+            </div>
+            <hr>
+            <p class="guide"><b>Lưu ý:</b> Việc truyền file sẽ được thiết lập tự động qua giao thức UDP ngang hàng (P2P) sau khi người nhận đồng ý.</p>
+        </div>
+
+        <div class="main-chat">
+            <div class="chat-header">
+                <h2>Phòng Chat Chung</h2>
+            </div>
+            <div id="chat-messages" class="chat-messages">
+                <!-- Tin nhắn sẽ được JavaScript đẩy vào đây -->
+            </div>
+            
+            <div class="chat-input-area">
+                <select id="chat-type">
+                    <option value="all">Nhắn Nhóm</option>
+                    <option value="private">Nhắn Mật</option>
+                </select>
+                <input type="text" id="chat-target" class="hidden" placeholder="Tên người nhận">
+                <input type="text" id="chat-input" placeholder="Nhập nội dung tin nhắn..." autocomplete="off">
+                <button id="send-chat-btn">Gửi</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
