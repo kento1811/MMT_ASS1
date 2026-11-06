@@ -7,7 +7,7 @@ from queue import Queue, Empty, Full
 
 from packet import Packet
 from constants import TCPFlags
-from exceptions import ConnectionTimeoutError, ProtocolError
+from exceptions import ConnectionTimeoutError, ProtocolError, PeerResetError
 from algorithms import SlidingWindow
 
 
@@ -68,11 +68,17 @@ class PacketService:
         self._eof = False
         self._pending_fin_seq = None
         self._fin_accepted_seq = None
-        self.incoming_packets = Queue()
+        # Giới hạn để feed_datagram thật sự drop khi quá tải (tránh phình RAM).
+        self.incoming_packets = Queue(maxsize=2048)
 
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.fin_ack_event = threading.Event()
+        # send() phải atomic: 2 thread gọi send() cùng lúc sẽ làm xen kẽ byte stream.
+        self._send_lock = threading.Lock()
+        self._rto_start = None        # mốc bắt đầu của RTO timer (1 timer/connection)
+        self._reset_by_peer = False
+        self._recover = 0             # NewReno: seq cao nhất lúc vào fast recovery
 
         self.fin_seq_num = None
         self.peer_fin_received = False
@@ -92,10 +98,12 @@ class PacketService:
         if ack_num is None:
             ack_num = (self.receive_window.receive_next
                        if self.receive_window is not None else 0)
+        window = self._advertised_window()
+        self._last_advertised_window = window   # cửa sổ peer thực sự nhìn thấy
         return Packet(
             src_port=self.src_port, dst_port=self.dst_port,
             seq_num=seq_num, ack_num=ack_num, flags=flags,
-            window_size=self._advertised_window(), payload=payload,
+            window_size=window, payload=payload,
         )
 
     def _advertised_window(self):
@@ -108,8 +116,6 @@ class PacketService:
         return max(0, min(free, cap, 65535))
 
     def _ooo_buffered_bytes(self):
-        if self.receive_window is None:
-            return 0
         try:
             return self.receive_window.buffered_bytes()
         except AttributeError as e:
@@ -148,8 +154,8 @@ class PacketService:
             receive_window_size=self.RECEIVE_BUFFER_BYTES,
         )
         self.seq_num = local_next_seq
-        self.last_ack_num = local_next_seq - 1
-        self.send_window_right = local_next_seq - 1 + self.peer_window
+        self.last_ack_num = local_next_seq
+        self.send_window_right = local_next_seq + self.peer_window
 
     def _rtt_sample(self, rtt):
         if self.srtt is None:
@@ -190,6 +196,10 @@ class PacketService:
                 current_timeout *= 2
                 continue
             except ConnectionResetError:
+                # Windows báo ICMP unreachable ngay lập tức; chờ rồi mới thử lại,
+                # nếu không 5 SYN sẽ bị đốt hết trong vài ms.
+                time.sleep(current_timeout)
+                current_timeout *= 2
                 continue
 
             packet = self._decode_packet(raw_data, address)
@@ -276,7 +286,7 @@ class PacketService:
 
             try:
                 self._handle_packet(packet)
-            except (OSError, ProtocolError) as e:
+            except Exception as e:   # 1 packet lỗi không được giết receiver thread
                 self._last_error = e
                 with self.condition:
                     if self.state in ("CLOSED", "FAILED"):
@@ -318,7 +328,7 @@ class PacketService:
             except ConnectionTimeoutError as e:
                 self._last_error = e
                 break
-            except (OSError, ProtocolError) as e:
+            except Exception as e:
                 self._last_error = e
 
     def _handle_packet(self, packet):
@@ -326,6 +336,7 @@ class PacketService:
             self.last_recv_time = time.monotonic()
 
             if packet.flags & TCPFlags.RST:
+                self._reset_by_peer = True
                 self.state = "CLOSED"
                 self.running = False
                 self.condition.notify_all()
@@ -373,40 +384,51 @@ class PacketService:
 
         if in_window:
             start = self.start_of_end.get(ack)
+            # Karn mở rộng: ACK tích lũy vượt qua segment đã gửi lại => RTT mơ hồ
+            # (gồm cả thời gian chờ lấp lỗ) nên bỏ mẫu, tránh làm RTO phình to.
+            crossed_retx = any(self.send_window.send_base <= r < ack
+                               for r in self.retransmitted)
             if (start is not None
                     and start in self.sent_at
-                    and start not in self.retransmitted):
+                    and start not in self.retransmitted
+                    and not crossed_retx):
                 self._rtt_sample(time.monotonic() - self.sent_at[start])
 
-        if (ack == self.send_window.send_base
+        # Dup ACK chỉ tính cho ACK "thuần" (không payload/SYN/FIN). Nếu không,
+        # mọi data packet của peer (đều mang cờ ACK với cùng ack_num) sẽ bị đếm
+        # nhầm là dup ACK -> fast retransmit giả + cwnd bị cắt khi truyền 2 chiều.
+        is_pure_ack = (not packet.payload
+                       and not (packet.flags & (TCPFlags.SYN | TCPFlags.FIN)))
+        if (is_pure_ack
+                and ack == self.send_window.send_base
                 and self.last_ack_num is not None
                 and ack == self.last_ack_num
                 and packet.window_size == self.peer_window
                 and self.send_window.send_base < self.send_window.next_seq_num):
             self.dup_ack_count += 1
-            if self.dup_ack_count == self.DUP_ACK_THRESHOLD:
+            if (not self.in_fast_recovery
+                    and self.dup_ack_count >= self.DUP_ACK_THRESHOLD):
                 self.in_fast_recovery = True
-                target = self.send_window.send_base
-                pkt = None
-                for seq, (p, _) in self.send_window.get_unacked_packets():
-                    if seq == target:
-                        pkt = p
-                        break
-                if pkt is not None:
-                    try:
-                        self._send_packet(pkt)
-                    except (OSError, ProtocolError):
-                        pass
-                    self.sent_at[target] = time.monotonic()
-                    self.retransmitted.add(target)
+                self._recover = self.send_window.next_seq_num
+                self._retransmit_seq_locked(self.send_window.send_base)
                 self.ssthresh = max(float(self.MIN_CWND), self.cwnd / 2)
                 self.cwnd = self.ssthresh + self.DUP_ACK_THRESHOLD * self.MSS
             elif self.in_fast_recovery:
                 self.cwnd = min(float(self.MAX_CWND), self.cwnd + self.MSS)
-        else:
-            if self.in_fast_recovery and ack > (self.last_ack_num or 0):
-                self.cwnd = self.ssthresh
-                self.in_fast_recovery = False
+        elif in_window and ack > self.send_window.send_base:
+            # Chỉ ACK tiến lên mới reset bộ đếm dup ACK (ACK cũ hoặc ACK chỉ đổi
+            # window không được reset).
+            if self.in_fast_recovery:
+                if ack >= self._recover:
+                    self.cwnd = self.ssthresh          # full ACK: thoát recovery
+                    self.in_fast_recovery = False
+                else:
+                    # NewReno partial ACK: còn "lỗ" khác trong cùng window ->
+                    # gửi lại đúng segment thiếu ngay, không chờ RTO.
+                    self.cwnd = max(float(self.MIN_CWND),
+                                    self.cwnd - (ack - self.send_window.send_base)
+                                    + self.MSS)
+                    self._retransmit_seq_locked(ack)
             self.dup_ack_count = 0
 
         if in_window:
@@ -414,6 +436,14 @@ class PacketService:
             self.send_window.process_ack(ack)
 
             acked = ack - old_base
+            if acked > 0:
+                self._rto_start = time.monotonic()   # restart RTO timer
+                # ACK tiến lên => hết backoff (như Linux); tính lại RTO từ SRTT.
+                if self.srtt is not None:
+                    self.rto = max(self.MIN_RTO, min(
+                        self.MAX_RTO, self.srtt + 4 * self.rttvar))
+                else:
+                    self.rto = self.INITIAL_RTO
             if acked > 0 and not self.in_fast_recovery:
                 if self.cwnd < self.ssthresh:
                     self.cwnd = min(float(self.MAX_CWND),
@@ -488,16 +518,44 @@ class PacketService:
                 pass
             self.condition.notify_all()
 
-    def _retransmit_due_locked(self):
-        now = time.monotonic()
-        due = []
-        for seq, (pkt, _) in self.send_window.get_unacked_packets():
-            sent_time = self.sent_at.get(seq, now)
-            if now - sent_time >= self.rto:
-                due.append((seq, pkt))
+    def _retransmit_seq_locked(self, seq):
+        """Gửi lại đúng 1 segment chưa ACK có seq cho trước (Karn: đánh dấu
+        retransmitted để không dùng làm mẫu RTT)."""
+        for s, (p, _) in self.send_window.get_unacked_packets():
+            if s == seq:
+                try:
+                    self._send_packet(p)
+                except (OSError, ProtocolError):
+                    pass
+                now = time.monotonic()
+                self.sent_at[seq] = now
+                self.retransmitted.add(seq)
+                self._rto_start = now
+                return True
+        return False
 
-        if not due:
+    def _retransmit_due_locked(self):
+        """RTO kiểu TCP: 1 timer cho cả connection, hết hạn thì chỉ gửi lại
+        segment CŨ NHẤT chưa ACK (send_base). Receiver đã buffer out-of-order
+        nên ACK tích lũy sẽ nhảy qua các segment đã nhận -> không gửi lại thừa
+        và không bị backoff nhiều lần cho cùng một lần mất gói."""
+        unacked = self.send_window.get_unacked_packets()
+        if not unacked:
             return
+        now = time.monotonic()
+        if self._rto_start is None:
+            self._rto_start = now
+            return
+        if now - self._rto_start < self.rto:
+            return
+
+        seq, (pkt, _) = min(unacked, key=lambda item: item[0])
+        retries = self.retry_counts.get(seq, 0)
+        if retries >= self.max_retries:
+            self.state = "FAILED"
+            self.condition.notify_all()
+            raise ConnectionTimeoutError(
+                f"Không nhận được ACK cho packet seq={seq}!")
 
         self.ssthresh = max(float(self.MIN_CWND), self.cwnd / 2)
         self.cwnd = float(self.MIN_CWND)
@@ -505,19 +563,19 @@ class PacketService:
         self.dup_ack_count = 0
         self.in_fast_recovery = False
 
-        for seq, pkt in due:
-            retries = self.retry_counts.get(seq, 0)
-            if retries >= self.max_retries:
-                self.state = "FAILED"
-                self.condition.notify_all()
-                raise ConnectionTimeoutError(
-                    f"Không nhận được ACK cho packet seq={seq}!")
-            self._send_packet(pkt)
-            self.sent_at[seq] = now
-            self.retry_counts[seq] = retries + 1
-            self.retransmitted.add(seq)
+        self._send_packet(pkt)
+        self.sent_at[seq] = now
+        self.retry_counts[seq] = retries + 1
+        self.retransmitted.add(seq)
+        self._rto_start = now
 
     def send(self, data: bytes, max_payload_size=None):
+        """Gửi atomic: các lời gọi send() song song được xếp hàng, không bị
+        xen kẽ byte giữa các message."""
+        with self._send_lock:
+            return self._send_impl(data, max_payload_size)
+
+    def _send_impl(self, data: bytes, max_payload_size=None):
         if self.state == "FAILED":
             raise ConnectionTimeoutError("Connection FAILED — không thể gửi tiếp!")
         if self.state == "CLOSED":
@@ -571,6 +629,8 @@ class PacketService:
                     self.condition.wait(timeout=0.05)
                     continue
 
+                if self.send_window.send_base == seq_num:
+                    self._rto_start = time.monotonic()   # window vừa từ rỗng -> có data
                 self.sent_at[seq_num] = time.monotonic()
                 self.retry_counts[seq_num] = 0
                 self.seq_end_map[seq_num] = seq_num + len(payload)
@@ -593,7 +653,9 @@ class PacketService:
         return len(data)
 
     def receive(self, timeout=None):
-        if self.state not in ("ESTABLISHED", "FAILED") and not self.peer_fin_received:
+        # Chỉ báo "chưa thiết lập" khi thật sự chưa từng connect. Sau RST/close
+        # (state CLOSED) vẫn phải đọc nốt data còn buffer rồi mới báo reset/EOF.
+        if self.receive_window is None:
             raise ProtocolError("Connection chưa được thiết lập!")
 
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -606,7 +668,9 @@ class PacketService:
                     raise ConnectionTimeoutError(
                         "Connection FAILED (timeout/RST) — dữ liệu có thể bị cắt!")
                 if self.state == "CLOSED" and not self._eof:
-                    raise ConnectionResetError(
+                    exc = (PeerResetError if self._reset_by_peer
+                           else ConnectionResetError)
+                    raise exc(
                         "Connection bị đóng bất thường (RST) — dữ liệu có thể bị cắt!")
 
             wait = 0.1
@@ -631,12 +695,13 @@ class PacketService:
                 if self._received_bytes < 0:
                     self._received_bytes = 0
                 new_win = self._advertised_window()
+                # _last_advertised_window được _make_packet cập nhật mỗi lần gửi
+                # -> chỉ gửi window update khi cửa sổ peer biết đang nhỏ hơn.
                 if new_win > self._last_advertised_window:
                     try:
                         self._send_packet(self._make_packet(flags=TCPFlags.ACK))
                     except (OSError, ProtocolError):
                         pass
-                self._last_advertised_window = new_win
             return data
 
     def close(self, timeout=3):
@@ -657,6 +722,10 @@ class PacketService:
         deadline = time.monotonic() + timeout
         retries = 0
         while not self.fin_ack_event.is_set():
+            if self._reset_by_peer:      # peer đã RST: không còn gì để chờ
+                self.running = False
+                self.state = "CLOSED"
+                return False
             self._send_packet(fin)
             remaining = deadline - time.monotonic()
             if remaining <= 0 or retries >= self.max_retries:
