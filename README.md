@@ -24,9 +24,11 @@ MMT_Ass1/
 ├── shared/                     # Thư mục dùng chung (Bộ não của giao thức HUDP)
 │   ├── __init__.py
 │   ├── constants.py            # Định nghĩa các hằng số mạng (MTU, timeout) và loại tin nhắn (AUTH, MSG, FILE)
-│   ├── schemas.py              # Pydantic models để mã hóa/giải mã dữ liệu có cấu trúc thành JSON
+│   ├── packet_service.py       # Hiện thực các tính chất của TCP
+|   ├── packet.py               # Định nghĩa TCP
 │   ├── protocol.py             # Dùng 'struct' thực hiện đóng/mở gói (mux/demux), gắn Custom HUDP Headers
 │   ├── security.py             # Chứa hàm mã hóa/giải mã (AES) cho data payloads trước khi truyền
+|   ├── mux.py                  # Hiện thực mux và demux
 │   ├── algorithms.py           # Thuật toán tính toán cửa sổ trượt (sliding window), băm file (chunking)
 │   └── exceptions.py           # Các class lỗi tự định nghĩa (Lệch sequence, sai checksum, rớt mạng)
 │
