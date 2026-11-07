@@ -7,7 +7,7 @@ from queue import Queue, Empty, Full
 
 from shared.packet import Packet
 from shared.constants import TCPFlags
-from shared.exceptions import ConnectionTimeoutError, ProtocolError
+from shared.exceptions import ConnectionTimeoutError, ProtocolError, PeerResetError
 from shared.algorithms import SlidingWindow
 
 
