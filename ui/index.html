@@ -20,6 +20,14 @@
     <!-- Màn hình Chat chính -->
     <div id="chat-screen" class="screen hidden">
         <div class="sidebar">
+            <div id="user-profile" style="margin-bottom: 20px; padding: 15px; background: #3c4043; border-radius: 8px; text-align: center;">
+                <span style="font-size: 13px; color: #9aa0a6;">Đang đăng nhập dưới tên</span><br>
+                <b id="my-username" style="font-size: 18px; color: #8ab4f8;">...</b>
+            </div>
+            <h3>🟢 Người dùng Online</h3>
+            <ul id="active-users-list" style="list-style: none; padding-bottom: 20px;">
+                <!-- JS sẽ đẩy danh sách vào đây -->
+            </ul>
             <h3>📦 Gửi File P2P</h3>
             <div class="file-form">
                 <input type="text" id="file-target" placeholder="Người nhận (VD: Bob)">
