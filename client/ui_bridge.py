@@ -54,7 +54,12 @@ class RequestHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             with open(full_path, "rb") as f:
-                self.wfile.write(f.read())
+                try:
+                    self.wfile.write(f.read())
+                except ConnectionAbortedError:
+                    pass # Bỏ qua lỗi 10053 khi F5 trình duyệt
+                except Exception:
+                    pass
         else:
             self.send_response(404)
             self.end_headers()

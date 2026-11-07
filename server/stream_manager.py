@@ -5,6 +5,7 @@ from shared.constants import TCPFlags
 from shared.packet import Packet
 from shared.packet_service import PacketService
 from shared.exceptions import ConnectionTimeoutError
+from shared.security import SecureStream
 
 
 class StreamManager:
@@ -20,6 +21,7 @@ class StreamManager:
         # Bảng định tuyến nội bộ: map từ (IP, Port) -> instance của PacketService
         self.connections = {}
         self.lock = threading.Lock()
+        self.channels = {} 
 
     def set_router(self, router):
         """Gắn Router vào sau khi khởi tạo để tránh Circular Import"""
@@ -29,30 +31,23 @@ class StreamManager:
     # 1. XỬ LÝ GÓI TIN ĐẾN (Được gọi liên tục bởi main.py)
     # ==========================================
     def handle_incoming_datagram(self, raw_data: bytes, addr: tuple):
-        """
-        Được main.py gọi mỗi khi sock.recvfrom() nhận được bytes.
-        Nhiệm vụ: Phân luồng datagram vào đúng PacketService.
-        """
         with self.lock:
+            # Lấy thẳng svc đã lưu lúc accept
             svc = self.connections.get(addr)
 
         if svc:
-            # Khách quen -> Ném datagram vào queue của PacketService đó
+            # Ném datagram cho lớp TCP (PacketService) bên dưới xử lý
             svc.feed_datagram(raw_data, addr)
         else:
-            # Khách lạ -> Phân tích xem có phải gói SYN mở kết nối không
+            # Phân tích SYN nếu là khách lạ
             try:
                 packet, _ = Packet.unpack(raw_data)
-
-                # Cờ SYN: Bắt đầu 3-way handshake
                 if packet.flags & TCPFlags.SYN:
                     self._accept_new_connection(addr, packet)
                 else:
-                    print(
-                        f"[StreamManager] Bỏ qua gói tin không phải SYN từ khách lạ {addr}"
-                    )
-            except Exception as e:
-                pass  # Bỏ qua rác/gói tin lỗi checksum
+                    print(f"[StreamManager] Bỏ qua gói tin không phải SYN từ khách lạ {addr}")
+            except Exception:
+                pass
 
     def _accept_new_connection(self, addr: tuple, syn_packet: Packet):
         print(f"[StreamManager] Đang thiết lập kết nối với {addr}...")
@@ -102,14 +97,16 @@ class StreamManager:
             print(f"[StreamManager] Lỗi establish: {e}")
 
         # 4. Lưu lại session và bật luồng lắng nghe
+        chan = SecureStream(svc, is_server=True, psk=b"HUDP_SECRET_KEY")
         with self.lock:
             self.connections[addr] = svc
+            self.channels[addr] = chan
 
         import threading
 
         threading.Thread(
             target=self._client_read_worker,
-            args=(addr, svc),
+            args=(addr, chan),
             daemon=True,
             name=f"Reader-{addr[1]}",
         ).start()
@@ -117,17 +114,20 @@ class StreamManager:
     # ==========================================
     # 2. LUỒNG LẮNG NGHE DỮ LIỆU TỪNG CLIENT
     # ==========================================
-    def _client_read_worker(self, addr: tuple, svc: PacketService):
+    def _client_read_worker(self, addr: tuple, chan: SecureStream):
         """
         Luồng chạy ngầm riêng cho mỗi client.
         Chờ lấy data hoàn chỉnh từ PacketService và ném cho Router.
         """
         try:
+            print(f"[StreamManager] Đang bắt tay bảo mật với {addr}...")
+            chan.handshake(timeout=10) 
+            print(f"[StreamManager] Bắt tay bảo mật thành công với {addr}!")
             while True:
                 # Hàm này sẽ block chờ tới khi có 1 chunk dữ liệu IN-ORDER
-                data = svc.receive()
+                data = chan.recv_message()
 
-                if data == b"":
+                if data is None:
                     # Nhận được cờ FIN từ Client -> Đóng kết nối an toàn (EOF)
                     print(f"[StreamManager] Client {addr} đóng kết nối (EOF).")
                     break
@@ -145,7 +145,7 @@ class StreamManager:
             print(f"[StreamManager] Lỗi luồng đọc {addr}: {e}")
         finally:
             # Bất kể đóng an toàn hay rớt mạng, luôn dọn dẹp rác
-            self._cleanup_connection(addr, svc)
+            self._cleanup_connection(addr, chan)
 
     # ==========================================
     # 3. GỬI DỮ LIỆU (Được gọi bởi Router/Handlers)
@@ -155,15 +155,18 @@ class StreamManager:
         Router nhờ gửi bytes tới một address.
         """
         with self.lock:
-            svc = self.connections.get(addr)
+            chan = self.channels.get(addr)
 
-        if svc:
+        if chan:
             try:
                 # Hàm send() của PacketService sẽ chia nhỏ data thành MSS,
                 # gửi và chờ ACK. (Blocking call)
-                svc.send(data)
+                chan.send_message(data)
             except Exception as e:
-                print(f"[StreamManager] Lỗi gửi data tới {addr}: {e}")
+                err_msg = str(e)
+                # CHỈ IN RA nếu đó là một lỗi lạ. 
+                if "chưa được thiết lập" not in err_msg and "CLOSED" not in err_msg:
+                    print(f"[StreamManager] Lỗi gửi data tới {addr}: {e}")
         else:
             print(f"[StreamManager] Không tìm thấy connection của {addr} để gửi.")
 
@@ -181,10 +184,28 @@ class StreamManager:
         # 2. Xóa khỏi StreamManager
         with self.lock:
             self.connections.pop(addr, None)
+            chan = self.channels.pop(addr, None)
+
+        if chan:
+            try:
+                chan.close()
+            except:
+                pass
 
         # 3. Báo cho StateManager "Đăng xuất" user này để user khác biết
         logged_out_user = self.state_manager.logout_by_address(addr)
         if logged_out_user:
-            print(
-                f"[StreamManager] Đã dọn dẹp xong session của user '{logged_out_user}'."
-            )
+            print(f"[StreamManager] Đã dọn dẹp xong session của user '{logged_out_user}'.")
+            
+            # --- THÊM MỚI: BÁO CHO CÁC CLIENT KHÁC CẬP NHẬT LẠI DANH SÁCH ---
+            all_users = self.state_manager.get_all_users_online()
+            import json
+            update_bytes = json.dumps({"action": "USER_LIST", "users": all_users}).encode('utf-8')
+            
+            # Lặp qua các channel đang còn sống để gửi danh sách mới
+            with self.lock:
+                for target_addr, target_chan in list(self.channels.items()):
+                    try:
+                        target_chan.send_message(update_bytes)
+                    except:
+                        pass

@@ -24,7 +24,7 @@ def handle_incoming_message(msg_obj: dict):
             ui_bridge.push_message_to_ui(
                 {"action": "SYSTEM", "msg": f"Bắt đầu đẩy luồng P2P File: {filename}"}
             )
-            file_handler.send_file("0.0.0.0", int(target_port), filepath)
+            file_handler.send_file("127.0.0.1", int(target_port), filepath)
         else:
             ui_bridge.push_message_to_ui(
                 {

@@ -3,6 +3,7 @@ import threading
 import json
 from shared.packet_service import PacketService
 from shared.exceptions import ConnectionTimeoutError
+from shared.security import  SecureStream
 from client.config import SERVER_IP, SERVER_PORT
 
 class ClientStreamManager:
@@ -11,10 +12,12 @@ class ClientStreamManager:
         self.sock = None
         self.message_callback = message_callback
         self.is_connected = False
+        self.chan = None
 
     def connect(self) -> bool:
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("0.0.0.0", 0))
+        if not self.sock:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.bind(("0.0.0.0", 0))
         local_port = self.sock.getsockname()[1]
         
         print(f"Đang chạy Client tại port {local_port}...")
@@ -28,6 +31,14 @@ class ClientStreamManager:
         print("Đang bắt tay (Handshake) với Server...")
         if self.svc.connect((SERVER_IP, SERVER_PORT)):
             self.is_connected = True
+            print("Đang thiết lập khóa bảo mật mã hóa đầu cuối...")
+            self.chan = SecureStream(self.svc, is_server=False, psk=b"HUDP_SECRET_KEY")
+            try:
+                self.chan.handshake(timeout=5)
+                print("Bảo mật thành công!")
+            except Exception as e:
+                print(f"Lỗi bảo mật: {e}")
+                return False
             # Bật luồng đọc ngầm ngay khi kết nối thành công
             threading.Thread(target=self._receive_worker, daemon=True).start()
             return True
@@ -36,14 +47,14 @@ class ClientStreamManager:
     def send_json(self, pydantic_obj):
         """Mã hóa Pydantic model thành chuỗi JSON bytes và gửi đi"""
         if self.is_connected:
-            self.svc.send(pydantic_obj.model_dump_json().encode('utf-8'))
+            self.chan.send_message(pydantic_obj.model_dump_json().encode('utf-8'))
 
     def _receive_worker(self):
         """Luồng ngầm liên tục lắng nghe và parse JSON"""
         while self.is_connected:
             try:
-                data = self.svc.receive(timeout=0.5)
-                if data == b"":
+                data = self.chan.recv_message(timeout=0.5)
+                if data is None:
                     self.message_callback({"action": "SYSTEM", "msg": "Server đã đóng kết nối."})
                     self.is_connected = False
                     break
@@ -64,6 +75,8 @@ class ClientStreamManager:
 
     def close(self):
         self.is_connected = False
+        if self.chan:
+            self.chan.close()
         if self.svc:
             self.svc.close(timeout=2)
         if self.sock:

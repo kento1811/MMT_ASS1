@@ -34,10 +34,18 @@ class ChatHandler:
         
         if success:
             res = GeneralResponse(status="ok", message="Đăng nhập thành công!")
-        else:
-            res = GeneralResponse(status="error", message="Username đã tồn tại hoặc đang được sử dụng.")
+            self._send_to_client(sender_address, res)
             
-        self._send_to_client(sender_address, res)
+            # --- THÊM MỚI: Broadcast danh sách user khi có người mới vào ---
+            all_users = self.state_manager.get_all_users_online()
+            update_msg = {"action": "USER_LIST", "users": all_users}
+            
+            import json
+            update_bytes = json.dumps(update_msg).encode('utf-8')
+            for user in all_users:
+                addr = self.state_manager.get_address(user)
+                if addr:
+                    self.stream_manager.send_to(addr, update_bytes)
 
     def _handle_chat(self, sender_address: tuple, msg_obj: ChatRequest):
         sender_username = self.state_manager.get_username(sender_address)

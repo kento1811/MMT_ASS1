@@ -6,6 +6,8 @@ from shared.packet import Packet
 from shared.packet_service import PacketService
 from shared.constants import TCPFlags
 from shared.exceptions import ConnectionTimeoutError
+from shared.security import SecureStream
+from client.ui_bridge import MESSAGE_QUEUE
 
 class FileHandler:
     def __init__(self, download_dir="downloads"):
@@ -69,7 +71,8 @@ class FileHandler:
                 peer_next_seq=packet.seq_num + 1,
                 peer_window=packet.window_size
             )
-            
+            chan = SecureStream(svc, is_server=True, psk=b"P2P_FILE_SECRET")
+            chan.handshake(timeout=10)
             # 4. Bắt đầu hứng file
             filepath = os.path.join(self.download_dir, filename)
             received_bytes = 0
@@ -78,8 +81,8 @@ class FileHandler:
                 while True:
                     try:
                         # Cứ chờ tối đa 5s cho mỗi chunk
-                        data = svc.receive(timeout=5.0) 
-                        if data == b"": # Nhận được cờ FIN -> EOF
+                        data = chan.recv_message(timeout=5.0) 
+                        if data is None: # Nhận được cờ FIN -> EOF
                             print(f"\n[File] ✅ Đã tải xong '{filename}'! Tổng: {received_bytes} bytes.\n> ", end="")
                             break
                             
@@ -94,7 +97,7 @@ class FileHandler:
                         break
                         
             # 5. Dọn dẹp
-            svc.close()
+            chan.close()
             sock.close()
             
         except Exception as e:
@@ -136,18 +139,31 @@ class FileHandler:
             chunk_size = 1024
             sent_bytes = 0
             filename = os.path.basename(filepath)
-            
+
+            chan = SecureStream(svc, is_server=False, psk=b"P2P_FILE_SECRET")
+            chan.handshake(timeout=10)
+
+            total_size = os.path.getsize(filepath)
             with open(filepath, "rb") as f:
                 while True:
                     chunk = f.read(chunk_size)
                     if not chunk:
                         break
                     # Hàm send() sẽ tự block đợi ACK rồi mới gửi chunk tiếp
-                    svc.send(chunk)
+                    chan.send_message(chunk)
                     sent_bytes += len(chunk)
+
+                    percent = int((sent_bytes / total_size) * 100)
+                    MESSAGE_QUEUE.put({
+                        "action": "FILE_PROGRESS", 
+                        "filename": filename, 
+                        "percent": percent,
+                        "type": "upload"
+                    })
                     
             print(f"\n[File] ✅ Đã gửi xong '{filename}'! Tổng: {sent_bytes} bytes.\n> ", end="")
             svc.close(timeout=2)
+            chan.close()
             sock.close()
             
         except Exception as e:

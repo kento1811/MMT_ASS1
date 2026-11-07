@@ -29,6 +29,8 @@ class StateManager:
         with self.lock:
             # Check duplicated username
             if username in self.users:
+                if self.users[username] == address:
+                    return True
                 return False
 
             # Check address is bind to other user -> Disconnected that
