@@ -106,4 +106,5 @@ temp/
 # =========================
 
 *.local
-
+source_copy.py
+source_code.txt
