@@ -8,7 +8,7 @@ from queue import Queue, Empty, Full
 from shared.packet import Packet
 from shared.constants import TCPFlags
 from shared.exceptions import ConnectionTimeoutError, ProtocolError, PeerResetError
-from shared.algorithms import SlidingWindow
+from shared.algorithms import SlidingWindow, seq_gt, seq_gte, seq_lt, seq_lte, seq_diff, MAX_SEQ
 
 
 class PacketService:
@@ -35,9 +35,7 @@ class PacketService:
         self.shared_socket = shared_socket
 
         self.state = "CLOSED"
-        # ISN random 16-bit. Seq/ack là 32-bit (Packet dùng 'I'), tăng theo byte.
-        # KHÔNG hỗ trợ wrap-around 32-bit — giới hạn ~4GB/connection.
-        self.seq_num = random.randint(0, 0xFFFF)
+        self.seq_num = random.randint(0, 0xFFFFFFFF)
         self.peer_address = None
 
         self.send_window = None
@@ -63,7 +61,7 @@ class PacketService:
         self.dup_ack_count = 0
         self.in_fast_recovery = False
 
-        # CUBIC Congestion Control parameters & states
+        # CUBIC Congestion Control
         self.cubic_c = 0.4
         self.cubic_beta = 0.7
         self.w_max = float(self.INITIAL_CWND)
@@ -74,17 +72,15 @@ class PacketService:
         self._eof = False
         self._pending_fin_seq = None
         self._fin_accepted_seq = None
-        # Giới hạn để feed_datagram thật sự drop khi quá tải (tránh phình RAM).
         self.incoming_packets = Queue(maxsize=2048)
 
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.fin_ack_event = threading.Event()
-        # send() phải atomic: 2 thread gọi send() cùng lúc sẽ làm xen kẽ byte stream.
         self._send_lock = threading.Lock()
-        self._rto_start = None        # mốc bắt đầu của RTO timer (1 timer/connection)
+        self._rto_start = None
         self._reset_by_peer = False
-        self._recover = 0             # seq cao nhất lúc vào fast recovery
+        self._recover = 0
 
         self.fin_seq_num = None
         self.peer_fin_received = False
@@ -98,17 +94,12 @@ class PacketService:
         self._time_wait_deadline = None
 
     def _cubic_update(self):
-        """Tính toán cwnd mục tiêu theo thuật toán CUBIC W(t) = C*(t - K)^3 + W_max."""
         if self.epoch_start is None:
             self.epoch_start = time.monotonic()
 
         t = time.monotonic() - self.epoch_start
         w_max_mss = self.w_max / self.MSS
-
-        # K = ((W_max * (1 - beta)) / C) ^ (1/3)
         target_k = ((w_max_mss * (1.0 - self.cubic_beta)) / self.cubic_c) ** (1.0 / 3.0)
-
-        # W_cubic(t) = C * (t - K)^3 + W_max
         target_mss = self.cubic_c * ((t - target_k) ** 3) + w_max_mss
         target_cwnd = target_mss * self.MSS
 
@@ -122,11 +113,11 @@ class PacketService:
             ack_num = (self.receive_window.receive_next
                        if self.receive_window is not None else 0)
         window = self._advertised_window()
-        self._last_advertised_window = window   # cửa sổ peer thực sự nhìn thấy
+        self._last_advertised_window = window
         return Packet(
             src_port=self.src_port, dst_port=self.dst_port,
-            seq_num=seq_num, ack_num=ack_num, flags=flags,
-            window_size=window, payload=payload,
+            seq_num=seq_num % MAX_SEQ, ack_num=ack_num % MAX_SEQ,
+            flags=flags, window_size=window, payload=payload,
         )
 
     def _advertised_window(self):
@@ -134,16 +125,14 @@ class PacketService:
             return 65535
         buffered = self._received_bytes + self._ooo_buffered_bytes()
         free = self.RECEIVE_BUFFER_BYTES - buffered
-        cap = getattr(self.receive_window, "receive_window_size",
-                      self.RECEIVE_BUFFER_BYTES)
+        cap = getattr(self.receive_window, "receive_window_size", self.RECEIVE_BUFFER_BYTES)
         return max(0, min(free, cap, 65535))
 
     def _ooo_buffered_bytes(self):
         try:
             return self.receive_window.buffered_bytes()
         except AttributeError as e:
-            raise ProtocolError(
-                "SlidingWindow phải có buffered_bytes()!") from e
+            raise ProtocolError("SlidingWindow phải có buffered_bytes()!") from e
 
     def _send_packet(self, packet):
         if self.peer_address is None:
@@ -157,9 +146,7 @@ class PacketService:
             packet, _ = Packet.unpack(raw_data)
         except (ValueError, struct.error):
             return None
-        if packet.src_port != self.dst_port:
-            return None
-        if packet.dst_port != self.src_port:
+        if packet.src_port != self.dst_port or packet.dst_port != self.src_port:
             return None
         return packet
 
@@ -174,9 +161,9 @@ class PacketService:
             send_window_size=self.MAX_CWND,
             receive_window_size=self.RECEIVE_BUFFER_BYTES,
         )
-        self.seq_num = local_next_seq
-        self.last_ack_num = local_next_seq
-        self.send_window_right = local_next_seq + self.peer_window
+        self.seq_num = local_next_seq % MAX_SEQ
+        self.last_ack_num = local_next_seq % MAX_SEQ
+        self.send_window_right = (local_next_seq + self.peer_window) % MAX_SEQ
 
     def _rtt_sample(self, rtt):
         if self.srtt is None:
@@ -185,8 +172,7 @@ class PacketService:
         else:
             self.rttvar = 0.75 * self.rttvar + 0.25 * abs(self.srtt - rtt)
             self.srtt = 0.875 * self.srtt + 0.125 * rtt
-        self.rto = max(self.MIN_RTO, min(self.MAX_RTO,
-                                         self.srtt + 4 * self.rttvar))
+        self.rto = max(self.MIN_RTO, min(self.MAX_RTO, self.srtt + 4 * self.rttvar))
 
     def _rto_backoff(self):
         self.rto = min(self.MAX_RTO, self.rto * 2)
@@ -202,8 +188,7 @@ class PacketService:
         self.state = "SYN_SENT"
 
         initial_seq = self.seq_num
-        syn = self._make_packet(flags=TCPFlags.SYN,
-                                seq_num=initial_seq, ack_num=0)
+        syn = self._make_packet(flags=TCPFlags.SYN, seq_num=initial_seq, ack_num=0)
 
         response = None
         current_timeout = timeout
@@ -228,7 +213,7 @@ class PacketService:
                 self.state = "CLOSED"
                 raise ProtocolError("Peer từ chối kết nối (RST).")
             if (packet.flags & TCPFlags.SYN and packet.flags & TCPFlags.ACK
-                    and packet.ack_num == initial_seq + 1):
+                    and packet.ack_num == (initial_seq + 1) % MAX_SEQ):
                 response = packet
                 break
 
@@ -239,15 +224,12 @@ class PacketService:
         if response.window_size is not None:
             self.peer_window = response.window_size
 
-        self._init_windows(initial_seq + 1, response.seq_num + 1)
-
+        self._init_windows((initial_seq + 1) % MAX_SEQ, (response.seq_num + 1) % MAX_SEQ)
         self._send_packet(self._make_packet(flags=TCPFlags.ACK))
         self._start_receiver()
         return True
 
-    def establish_server_side(self, peer_address, peer_port,
-                              local_next_seq, peer_next_seq,
-                              peer_window=65535):
+    def establish_server_side(self, peer_address, peer_port, local_next_seq, peer_next_seq, peer_window=65535):
         if self.state != "CLOSED":
             raise ProtocolError("Connection không ở trạng thái CLOSED!")
         self.peer_address = peer_address
@@ -274,11 +256,9 @@ class PacketService:
         if not self.shared_socket:
             self.sock.settimeout(0.2)
 
-        self.receiver_thread = threading.Thread(
-            target=self._receive_loop, daemon=True, name="pkt-recv")
+        self.receiver_thread = threading.Thread(target=self._receive_loop, daemon=True, name="pkt-recv")
         self.receiver_thread.start()
-        self.timer_thread = threading.Thread(
-            target=self._timer_loop, daemon=True, name="pkt-timer")
+        self.timer_thread = threading.Thread(target=self._timer_loop, daemon=True, name="pkt-timer")
         self.timer_thread.start()
 
     def _receive_loop(self):
@@ -328,14 +308,12 @@ class PacketService:
                             break
                         continue
 
-                    if (self.state == "ESTABLISHED"
-                            and now - self.last_recv_time > self.IDLE_TIMEOUT):
+                    if self.state == "ESTABLISHED" and now - self.last_recv_time > self.IDLE_TIMEOUT:
                         self.state = "FAILED"
                         self.condition.notify_all()
                         break
 
-                    if (self.state == "ESTABLISHED"
-                            and now - self.last_keepalive_sent >= self.KEEPALIVE_INTERVAL):
+                    if self.state == "ESTABLISHED" and now - self.last_keepalive_sent >= self.KEEPALIVE_INTERVAL:
                         try:
                             self._send_packet(self._make_packet(flags=TCPFlags.ACK))
                         except (OSError, ProtocolError):
@@ -368,16 +346,12 @@ class PacketService:
                 buffered = self._received_bytes + self._ooo_buffered_bytes()
                 free = self.RECEIVE_BUFFER_BYTES - buffered
                 if len(packet.payload) > free:
-                    ack = self._make_packet(
-                        flags=TCPFlags.ACK,
-                        ack_num=self.receive_window.receive_next)
+                    ack = self._make_packet(flags=TCPFlags.ACK, ack_num=self.receive_window.receive_next)
                     self._send_packet(ack)
                 else:
-                    data, ack_num = self.receive_window.receive_packet(
-                        packet.seq_num, packet.payload)
+                    data, ack_num = self.receive_window.receive_packet(packet.seq_num, packet.payload)
                     if ack_num is not None:
-                        ack = self._make_packet(
-                            flags=TCPFlags.ACK, ack_num=ack_num)
+                        ack = self._make_packet(flags=TCPFlags.ACK, ack_num=ack_num)
                         self._send_packet(ack)
                     if data:
                         self.received_data.put(data)
@@ -390,20 +364,20 @@ class PacketService:
     def _handle_ack_locked(self, packet):
         if (self.fin_seq_num is not None
                 and self.state in ("ESTABLISHED", "TIME_WAIT")
-                and packet.ack_num == self.fin_seq_num + 1
+                and packet.ack_num == (self.fin_seq_num + 1) % MAX_SEQ
                 and self.send_window is not None
-                and packet.ack_num <= self.send_window.next_seq_num + 1):
+                and seq_lte(packet.ack_num, (self.send_window.next_seq_num + 1) % MAX_SEQ)):
             self.fin_ack_event.set()
 
         if self.send_window is None:
             return
 
         ack = packet.ack_num
-        in_window = self.send_window.send_base <= ack <= self.send_window.next_seq_num
+        in_window = seq_gte(ack, self.send_window.send_base) and seq_lte(ack, self.send_window.next_seq_num)
 
         if in_window:
             start = self.start_of_end.get(ack)
-            crossed_retx = any(self.send_window.send_base <= r < ack
+            crossed_retx = any(seq_gte(r, self.send_window.send_base) and seq_lt(r, ack)
                                for r in self.retransmitted)
             if (start is not None
                     and start in self.sent_at
@@ -411,37 +385,34 @@ class PacketService:
                     and not crossed_retx):
                 self._rtt_sample(time.monotonic() - self.sent_at[start])
 
-        is_pure_ack = (not packet.payload
-                       and not (packet.flags & (TCPFlags.SYN | TCPFlags.FIN)))
+        is_pure_ack = (not packet.payload and not (packet.flags & (TCPFlags.SYN | TCPFlags.FIN)))
         if (is_pure_ack
                 and ack == self.send_window.send_base
                 and self.last_ack_num is not None
                 and ack == self.last_ack_num
                 and packet.window_size == self.peer_window
-                and self.send_window.send_base < self.send_window.next_seq_num):
+                and seq_lt(self.send_window.send_base, self.send_window.next_seq_num)):
             self.dup_ack_count += 1
-            if (not self.in_fast_recovery
-                    and self.dup_ack_count >= self.DUP_ACK_THRESHOLD):
+            if not self.in_fast_recovery and self.dup_ack_count >= self.DUP_ACK_THRESHOLD:
                 self.in_fast_recovery = True
                 self._recover = self.send_window.next_seq_num
                 self._retransmit_seq_locked(self.send_window.send_base)
 
-                # CUBIC loss update
                 self.w_max = self.cwnd
                 self.epoch_start = time.monotonic()
                 self.ssthresh = max(float(self.MIN_CWND), self.cwnd * self.cubic_beta)
                 self.cwnd = self.ssthresh + self.DUP_ACK_THRESHOLD * self.MSS
             elif self.in_fast_recovery:
                 self.cwnd = min(float(self.MAX_CWND), self.cwnd + self.MSS)
-        elif in_window and ack > self.send_window.send_base:
+        elif in_window and seq_gt(ack, self.send_window.send_base):
             if self.in_fast_recovery:
-                if ack >= self._recover:
-                    self.cwnd = self.ssthresh          # full ACK: thoát recovery
+                if seq_gte(ack, self._recover):
+                    self.cwnd = self.ssthresh
                     self.in_fast_recovery = False
+                    self.epoch_start = time.monotonic()
                 else:
                     self.cwnd = max(float(self.MIN_CWND),
-                                    self.cwnd - (ack - self.send_window.send_base)
-                                    + self.MSS)
+                                    self.cwnd - seq_diff(ack, self.send_window.send_base) + self.MSS)
                     self._retransmit_seq_locked(ack)
             self.dup_ack_count = 0
 
@@ -449,18 +420,16 @@ class PacketService:
             old_base = self.send_window.send_base
             self.send_window.process_ack(ack)
 
-            acked = ack - old_base
+            acked = seq_diff(ack, old_base)
             if acked > 0:
-                self._rto_start = time.monotonic()   # restart RTO timer
+                self._rto_start = time.monotonic()
                 if self.srtt is not None:
-                    self.rto = max(self.MIN_RTO, min(
-                        self.MAX_RTO, self.srtt + 4 * self.rttvar))
+                    self.rto = max(self.MIN_RTO, min(self.MAX_RTO, self.srtt + 4 * self.rttvar))
                 else:
                     self.rto = self.INITIAL_RTO
             if acked > 0 and not self.in_fast_recovery:
                 if self.cwnd < self.ssthresh:
-                    self.cwnd = min(float(self.MAX_CWND),
-                                    self.cwnd + acked)
+                    self.cwnd = min(float(self.MAX_CWND), self.cwnd + acked)
                 else:
                     target_cwnd = self._cubic_update()
                     if target_cwnd > self.cwnd:
@@ -481,10 +450,10 @@ class PacketService:
                         self.start_of_end.pop(end, None)
 
         if in_window:
-            if self.last_ack_num is None or ack >= self.last_ack_num:
+            if self.last_ack_num is None or seq_gte(ack, self.last_ack_num):
                 self.peer_window = packet.window_size
                 self.last_ack_num = ack
-                self.send_window_right = ack + packet.window_size
+                self.send_window_right = (ack + packet.window_size) % MAX_SEQ
 
         self.condition.notify_all()
 
@@ -492,19 +461,17 @@ class PacketService:
         if self.receive_window is None:
             return
 
-        fin_seq = packet.seq_num + len(packet.payload)
+        fin_seq = (packet.seq_num + len(packet.payload)) % MAX_SEQ
 
         if self._fin_accepted_seq is not None:
             if fin_seq == self._fin_accepted_seq:
-                ack = self._make_packet(
-                    flags=TCPFlags.ACK,
-                    ack_num=self.receive_window.receive_next)
+                ack = self._make_packet(flags=TCPFlags.ACK, ack_num=self.receive_window.receive_next)
                 self._send_packet(ack)
                 return
 
         expected = self.receive_window.receive_next
         if fin_seq == expected:
-            self.receive_window.receive_next += 1
+            self.receive_window.receive_next = (self.receive_window.receive_next + 1) % MAX_SEQ
             self.peer_fin_received = True
             self._eof = True
             self._fin_accepted_seq = fin_seq
@@ -512,8 +479,7 @@ class PacketService:
         else:
             self._pending_fin_seq = fin_seq
 
-        ack = self._make_packet(
-            flags=TCPFlags.ACK, ack_num=self.receive_window.receive_next)
+        ack = self._make_packet(flags=TCPFlags.ACK, ack_num=self.receive_window.receive_next)
         self._send_packet(ack)
         self.condition.notify_all()
 
@@ -521,15 +487,13 @@ class PacketService:
         if self._pending_fin_seq is None or self.receive_window is None:
             return
         if self.receive_window.receive_next == self._pending_fin_seq:
-            self.receive_window.receive_next += 1
+            self.receive_window.receive_next = (self.receive_window.receive_next + 1) % MAX_SEQ
             self.peer_fin_received = True
             self._eof = True
             self._fin_accepted_seq = self._pending_fin_seq
             self._pending_fin_seq = None
             try:
-                ack = self._make_packet(
-                    flags=TCPFlags.ACK,
-                    ack_num=self.receive_window.receive_next)
+                ack = self._make_packet(flags=TCPFlags.ACK, ack_num=self.receive_window.receive_next)
                 self._send_packet(ack)
             except (OSError, ProtocolError):
                 pass
@@ -565,10 +529,8 @@ class PacketService:
         if retries >= self.max_retries:
             self.state = "FAILED"
             self.condition.notify_all()
-            raise ConnectionTimeoutError(
-                f"Không nhận được ACK cho packet seq={seq}!")
+            raise ConnectionTimeoutError(f"Không nhận được ACK cho packet seq={seq}!")
 
-        # CUBIC loss update on RTO
         self.w_max = self.cwnd
         self.epoch_start = time.monotonic()
         self.ssthresh = max(float(self.MIN_CWND), self.cwnd * self.cubic_beta)
@@ -607,24 +569,18 @@ class PacketService:
             with self.condition:
                 while True:
                     if self.state == "FAILED":
-                        raise ConnectionTimeoutError(
-                            "Connection FAILED — không thể gửi tiếp!")
+                        raise ConnectionTimeoutError("Connection FAILED — không thể gửi tiếp!")
                     if self.state == "CLOSED":
-                        raise ConnectionResetError(
-                            "Connection đã đóng — không thể gửi tiếp!")
+                        raise ConnectionResetError("Connection đã đóng — không thể gửi tiếp!")
                     if self.state != "ESTABLISHED":
                         raise ProtocolError("Connection không còn hoạt động!")
 
                     if self.send_window_right is None:
-                        self.send_window_right = (
-                            self.send_window.send_base + self.peer_window)
-                    peer_right = self.send_window_right
-                    cong_right = self.send_window.send_base + int(self.cwnd)
-                    sws_right = (self.send_window.send_base
-                                 + self.send_window.send_window_size)
-                    effective_right = min(peer_right, cong_right, sws_right)
-
-                    available = effective_right - self.send_window.next_seq_num
+                        self.send_window_right = (self.send_window.send_base + self.peer_window) % MAX_SEQ
+                    
+                    effective_right = (self.send_window.send_base + min(self.peer_window, int(self.cwnd), self.send_window.send_window_size)) % MAX_SEQ
+                    available = seq_diff(effective_right, self.send_window.next_seq_num)
+                    
                     if available > 0:
                         break
                     self.condition.wait(timeout=0.05)
@@ -634,8 +590,7 @@ class PacketService:
                 payload = data[offset:offset + payload_size]
                 seq_num = self.send_window.next_seq_num
 
-                packet = self._make_packet(
-                    flags=TCPFlags.ACK, seq_num=seq_num, payload=payload)
+                packet = self._make_packet(flags=TCPFlags.ACK, seq_num=seq_num, payload=payload)
 
                 if not self.send_window.add_packet(seq_num, packet, len(payload)):
                     self.condition.wait(timeout=0.05)
@@ -645,20 +600,18 @@ class PacketService:
                     self._rto_start = time.monotonic()
                 self.sent_at[seq_num] = time.monotonic()
                 self.retry_counts[seq_num] = 0
-                self.seq_end_map[seq_num] = seq_num + len(payload)
-                self.start_of_end[seq_num + len(payload)] = seq_num
+                self.seq_end_map[seq_num] = (seq_num + len(payload)) % MAX_SEQ
+                self.start_of_end[(seq_num + len(payload)) % MAX_SEQ] = seq_num
                 self._send_packet(packet)
                 offset += payload_size
 
         final_seq = self.send_window.next_seq_num
         with self.condition:
-            while self.send_window.send_base < final_seq:
+            while seq_lt(self.send_window.send_base, final_seq):
                 if self.state == "FAILED":
-                    raise ConnectionTimeoutError(
-                        "Connection FAILED — không thể hoàn tất gửi!")
+                    raise ConnectionTimeoutError("Connection FAILED — không thể hoàn tất gửi!")
                 if self.state == "CLOSED":
-                    raise ConnectionResetError(
-                        "Connection đã đóng — không thể hoàn tất gửi!")
+                    raise ConnectionResetError("Connection đã đóng — không thể hoàn tất gửi!")
                 if self.state != "ESTABLISHED":
                     raise ProtocolError("Connection không còn hoạt động!")
                 self.condition.wait(timeout=0.05)
@@ -675,13 +628,10 @@ class PacketService:
 
             if self.received_data.empty():
                 if self.state == "FAILED":
-                    raise ConnectionTimeoutError(
-                        "Connection FAILED (timeout/RST) — dữ liệu có thể bị cắt!")
+                    raise ConnectionTimeoutError("Connection FAILED (timeout/RST) — dữ liệu có thể bị cắt!")
                 if self.state == "CLOSED" and not self._eof:
-                    exc = (PeerResetError if self._reset_by_peer
-                           else ConnectionResetError)
-                    raise exc(
-                        "Connection bị đóng bất thường (RST) — dữ liệu có thể bị cắt!")
+                    exc = (PeerResetError if self._reset_by_peer else ConnectionResetError)
+                    raise exc("Connection bị đóng bất thường (RST) — dữ liệu có thể bị cắt!")
 
             wait = 0.1
             if deadline is not None:
@@ -690,8 +640,7 @@ class PacketService:
                     if self._eof and self.received_data.empty():
                         return b""
                     if self.state in ("FAILED", "CLOSED"):
-                        raise ConnectionTimeoutError(
-                            "Connection chết trong khi chờ dữ liệu!")
+                        raise ConnectionTimeoutError("Connection chết trong khi chờ dữ liệu!")
                     raise ConnectionTimeoutError("Hết thời gian chờ dữ liệu!")
                 wait = min(wait, remaining)
 
@@ -724,8 +673,7 @@ class PacketService:
 
         self.fin_ack_event.clear()
         self.fin_seq_num = self.send_window.next_seq_num
-        fin = self._make_packet(flags=TCPFlags.FIN | TCPFlags.ACK,
-                                seq_num=self.fin_seq_num)
+        fin = self._make_packet(flags=TCPFlags.FIN | TCPFlags.ACK, seq_num=self.fin_seq_num)
 
         deadline = time.monotonic() + timeout
         retries = 0
@@ -758,11 +706,9 @@ class PacketService:
             self._time_wait_deadline = time.monotonic() + self.TIME_WAIT_SECONDS
             self.condition.notify_all()
 
-        if (self.receiver_thread is not None
-                and self.receiver_thread is not threading.current_thread()):
+        if self.receiver_thread is not None and self.receiver_thread is not threading.current_thread():
             self.receiver_thread.join(timeout=self.TIME_WAIT_SECONDS + 1)
-        if (self.timer_thread is not None
-                and self.timer_thread is not threading.current_thread()):
+        if self.timer_thread is not None and self.timer_thread is not threading.current_thread():
             self.timer_thread.join(timeout=self.TIME_WAIT_SECONDS + 1)
 
         self.running = False
