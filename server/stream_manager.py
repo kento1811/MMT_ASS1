@@ -158,15 +158,12 @@ class StreamManager:
             chan = self.channels.get(addr)
 
         if chan:
-            try:
-                # Hàm send() của PacketService sẽ chia nhỏ data thành MSS,
-                # gửi và chờ ACK. (Blocking call)
-                chan.send_message(data)
-            except Exception as e:
-                err_msg = str(e)
-                # CHỈ IN RA nếu đó là một lỗi lạ. 
-                if "chưa được thiết lập" not in err_msg and "CLOSED" not in err_msg:
-                    print(f"[StreamManager] Lỗi gửi data tới {addr}: {e}")
+            import threading
+            threading.Thread(
+                target=self._async_send_worker, 
+                args=(chan, addr, data), 
+                daemon=True
+            ).start()
         else:
             print(f"[StreamManager] Không tìm thấy connection của {addr} để gửi.")
 
@@ -202,10 +199,17 @@ class StreamManager:
             import json
             update_bytes = json.dumps({"action": "USER_LIST", "users": all_users}).encode('utf-8')
             
-            # Lặp qua các channel đang còn sống để gửi danh sách mới
-            with self.lock:
-                for target_addr, target_chan in list(self.channels.items()):
-                    try:
-                        target_chan.send_message(update_bytes)
-                    except:
-                        pass
+            active_channels = list(self.channels.keys()) 
+            for target_addr in active_channels:
+                # Dùng lại cơ chế fire-and-forget của hàm send_to đã fix
+                self.send_to(target_addr, update_bytes)
+
+    def _async_send_worker(self, chan, addr, data):
+        try:
+            # Hàm send() của PacketService sẽ chia nhỏ data thành MSS,
+            # gửi và chờ ACK. (Chỉ block luồng ngầm này, không block Server)
+            chan.send_message(data)
+        except Exception as e:
+            err_msg = str(e)
+            if "chưa được thiết lập" not in err_msg and "CLOSED" not in err_msg:
+                print(f"[StreamManager] Lỗi gửi data tới {addr}: {e}")

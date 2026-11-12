@@ -25,11 +25,18 @@ def start_server():
     # 3. Vòng lặp Core (I/O) - Chỉ làm duy nhất 1 việc: Đón bưu kiện
     try:
         while True:
-            # Nhận nguyên cục raw_data (tối đa 65535 bytes) từ OS
-            raw_data, addr = sock.recvfrom(65535)
-            
-            # Quăng ngay vào cho StreamManager xử lý, không để vòng lặp bị đứng
-            stream_manager.handle_incoming_datagram(raw_data, addr)
+            try:
+                # Nhận nguyên cục raw_data (tối đa 65535 bytes) từ OS
+                raw_data, addr = sock.recvfrom(65535)
+                
+                # Quăng ngay vào cho StreamManager xử lý
+                stream_manager.handle_incoming_datagram(raw_data, addr)
+                
+            except ConnectionResetError:
+                # XỬ LÝ LỖI WINERROR 10054: 
+                pass
+            except Exception as e:
+                print(f"[Server Lõi] Lỗi ngoại lệ vòng lặp UDP: {e}")
             
     except KeyboardInterrupt:
         print("\nĐang tắt Server...")
