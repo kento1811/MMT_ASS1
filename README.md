@@ -1,99 +1,132 @@
 # HUDP Collaboration Platform
 
-> **Distributed and Streaming-based Client-Server Collaboration Application over custom HUDP Protocol**
+> **Distributed and Streaming-based Client-Server & P2P Collaboration Application over custom HUDP Protocol**
 
-[Python Version: 3.10+]
-[License: MIT]
-
-Đồ án môn **Mạng Máy Tính** - Trường Đại học Bách Khoa - ĐHQG TP.HCM.
-
----
+Đồ án môn **Mạng Máy Tính** — Trường Đại học Bách Khoa – ĐHQG TP.HCM.
 
 ## 1. Giới thiệu Tổng quan
 
-**HUDP Platform** là ứng dụng cộng tác thời gian thực cho phép nhắn tin và chia sẻ tệp tin trực tiếp (Peer-to-Peer) trong môi trường mạng LAN khép kín.
+**HUDP Collaboration Platform** là ứng dụng cộng tác thời gian thực cho phép nhắn tin (nhóm/riêng tư) và chia sẻ tệp tin trực tiếp ngang hàng (**Peer-to-Peer**) trong môi trường mạng LAN.
 
-Dự án **hoàn toàn sử dụng Raw Socket UDP** thông qua giao thức tùy chỉnh **HUDP (High User Datagram Protocol)**, tích hợp các cơ chế:
+Toàn bộ hệ thống được xây dựng trên **Raw UDP Socket** thông qua giao thức truyền vận tùy chỉnh **HUDP (Hybrid/High User Datagram Protocol)**, tự hiện thực đầy đủ các tính chất cốt lõi của TCP và tầng bảo mật hiện đại:
 
-- **Độ tin cậy:** Sequence Number, Cumulative ACK, RTO linh hoạt, Fast Retransmit.
-- **Kiểm soát tắc nghẽn & luồng:** Cửa sổ trượt (Sliding Window) kết hợp thuật toán **CUBIC Congestion Control**.
-- **Bảo mật:** Trao đổi khóa **ECDH (X25519)** và mã hóa dữ liệu **AES-256-GCM**.
-- **UI & Truyền tệp P2P:** Giao diện Web (HTTP Bridge/JS) và Đục lỗ NAT kết hợp Chunking 1024-byte.
+* **Truyền tải tin cậy & Đúng thứ tự:** Đánh số thứ tự theo byte (32-bit hỗ trợ wrap-around), Cumulative ACK, bộ đệm ghép gói out-of-order, RTO linh hoạt (Jacobson/Karels + quy tắc Karn) và Fast Retransmit (3 Dup-ACK).
 
----
+* **Kiểm soát luồng & Tắc nghẽn:** Sliding Window kết hợp **CUBIC Congestion Control** (RFC 8312) và **NewReno Fast Recovery**.
+
+* **Bảo mật đầu cuối (E2EE):** Trao đổi khóa **ECDH (X25519)** kết hợp **HKDF-SHA256** và mã hóa luồng **AES-256-GCM** chống nghe lén, giả mạo và phát lại.
+
+* **Kiến trúc Client-Server & P2P:** Server đa nhiệm trên 1 cổng UDP duy nhất; Client tích hợp Web UI cục bộ qua HTTP Bridge; truyền file P2P trực tiếp giữa hai Client có mã hóa riêng.
 
 ## 2. Cấu trúc Thư mục
 
-``` tree
-.
-├── client/          # Logic Client (Stream Manager, File Handler, UI Bridge)
-├── server/          # Logic Server (Mux/Demux, Router, State Manager)
-├── shared/          # Lõi giao thức HUDP (Packet, Crypto, Sliding Window, CUBIC)
-├── ui/              # Giao diện Web UI (HTML/CSS/JS)
-├── tests/           # Unit & Integration Tests (Pytest)
-├── simulations/     # Các kịch bản Chaos, Load Test, và UI Simulation
-├── run.py           # Menu tương tác để chạy hệ thống (Interactive CLI)
-└── README.txt       # Tài liệu bạn đang đọc
 ```
+.
+├── client/                    # Tầng ứng dụng phía Máy khách
+│   ├── config.py              # Cấu hình địa chỉ Server (IP, Port)
+│   ├── main.py                # Điểm khởi chạy Client & điều phối sự kiện P2P
+│   ├── stream_manager.py      # Quản lý kết nối HUDP & SecureStream tới Server
+│   ├── file_handler.py        # Xử lý truyền/nhận file P2P trực tiếp qua UDP
+│   └── ui_bridge.py           # HTTP Server cục bộ làm cầu nối với Web UI
+├── server/                    # Tầng ứng dụng phía Máy chủ
+│   ├── config.py              # Cấu hình cổng lắng nghe (9000), giới hạn kết nối
+│   ├── main.py                # Vòng lặp nhận datagram UDP lõi
+│   ├── stream_manager.py      # Mux/Demux các kết nối PacketService & SecureStream
+│   ├── state_manager.py       # Quản lý trạng thái đăng nhập (username <-> addr)
+│   ├── router.py              # Phân luồng bản tin JSON theo ActionType
+│   ├── chat_handler.py        # Nghiệp vụ Login, Chat riêng, Broadcast & User List
+│   └── file_handler.py        # Signaling điều phối kết nối P2P giữa 2 Client
+├── shared/                    # Lõi giao thức HUDP & Bảo mật dùng chung
+│   ├── constants.py           # Định nghĩa cờ điều khiển (SYN, ACK, FIN, RST, PSH)
+│   ├── exceptions.py          # Hệ thống ngoại lệ tầng truyền vận
+│   ├── algorithms.py          # Checksum 16-bit, số học Modulo 2^32, SlidingWindow
+│   ├── packet.py              # Cấu trúc gói tin 18-byte (pack/unpack)
+│   ├── packet_service.py      # Lõi giao thức TCP-over-UDP (CUBIC, RTO, Flow Control)
+│   ├── mux.py                 # Bộ phân kênh ServerMux độc lập
+│   ├── security.py            # X25519 ECDH, AES-256-GCM (SecureStream, CryptoBox)
+│   └── schemas.py             # Định dạng bản tin giao tiếp chuẩn hóa bằng Pydantic
+├── ui/                        # Giao diện người dùng Web (HTML5, CSS3, Vanilla JS)
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+├── tests/                     # Unit & Integration Tests (Pytest)
+├── simulations/               # Các kịch bản mô phỏng & kiểm thử chịu tải
+│   ├── simulate_ui.py         # Chạy tự động 1 Server + 3 Client Web UI
+│   ├── chaos_network.py       # Giả lập rớt gói 30% & ngắt kết nối đột ngột
+│   ├── p2p_stress.py          # Kiểm thử truyền nhiều file P2P song song & 2 chiều
+│   ├── load_test.py           # Kiểm thử chịu tải 20 Client đồng thời
+│   └── demo_advanced_cases.py # Demo Tamper Attack, Replay Attack & Benchmark
+├── run.py                     # Bảng điều khiển tương tác (Interactive CLI Control Panel)
+├── huong_dan_ki_thuat.md      # Tài liệu đặc tả kỹ thuật chi tiết (Core, Server, Client)
+└── requirement.txt            # Danh sách thư viện phụ thuộc
 
----
+```
 
 ## 3. Yêu cầu Hệ thống & Cài đặt
 
-- **Yêu cầu:** Python 3.10+
-- **Cài đặt thư viện:**
-Mở Terminal/Command Prompt tại thư mục gốc và chạy:
+* **Môi trường:** Python **3.10+** (hỗ trợ Windows, Linux, macOS).
 
-``` bash
-  python -m venv venv
+* **Cài đặt môi trường ảo & thư viện:**
+
 ```
+# 1. Tạo môi trường ảo
+python -m venv venv
 
-(Windows):
-
-``` bash
+# 2. Kích hoạt môi trường ảo
+# Trên Windows:
 venv\Scripts\activate
-```
-
-(macOS/Linux):
-
-``` bash
+# Trên Linux / macOS:
 source venv/bin/activate
-```  
 
-Cài các thư viện cần thiết.
+# 3. Cài đặt thư viện
+pip install -r requirement.txt
 
-``` bash
-pip install -r requirements.txt
 ```
 
----
+*(Lưu ý: Nếu chạy nhiều Client trên các máy khác nhau trong mạng LAN, hãy cập nhật `SERVER_IP` trong file `client/config.py` thành địa chỉ IP LAN của máy chạy Server).*
 
-## 4. Hướng dẫn Chạy Ứng dụng (Sử dụng run.py)
+## 4. Hướng dẫn Chạy Ứng dụng
 
-Dự án sử dụng giao diện Menu tương tác thân thiện. Bạn chỉ cần chạy lệnh duy nhất sau tại thư mục gốc:
+### Cách 1: Sử dụng Control Panel (`run.py`) — Khuyên dùng
 
-``` bash
-  python run.py
+Tại thư mục gốc dự án, chạy lệnh:
+
+```
+python run.py
+
 ```
 
-Một Control Panel sẽ hiện ra với các lựa chọn:
+Menu điều khiển sẽ hiển thị các tùy chọn:
 
-  [1] Khởi động Server (Chạy máy chủ tại cổng UDP 9000).
+* **`[1]` Khởi động Máy chủ:** Mở Server tại cổng `UDP 9000`.
 
-  [2] Khởi động Client (Hệ thống sẽ hỏi bạn muốn dùng cổng bao nhiêu cho Web UI).
+* **`[2]` Khởi động Máy khách:** Nhập cổng Web UI (mặc định `8080`), sau đó mở trình duyệt tại `http://127.0.0.1:8080`.
 
-  [3] Chạy Demo Tự động (Tự bật 1 Server và 3 Client Web UI cùng lúc - Rất tiện để test nhanh).
-  
-  [4] -> [7] Chạy các kịch bản kiểm thử (Stress test, Load test, Security, Chaos Network).
+* **`[3]` Chạy Demo Tự động:** Tự động bật 1 Server và 3 cửa sổ Client tại các cổng `8001`, `8002`, `8003`.
 
-Bạn chỉ cần nhập số tương ứng và nhấn Enter!
+* **`[4]` – `[7]` Chạy mô phỏng & kiểm thử:** Chaos Network, P2P Stress Test, Load Test (20 bots), và Demo Bảo mật nâng cao.
 
----
+### Cách 2: Chạy thủ công từng thành phần qua Terminal
 
-## 5. Hướng dẫn Kiểm thử tự động (Unit Tests)
+Đảm bảo đứng ở thư mục gốc (`MMT_ASS1`) để Python nhận diện đúng các package `shared`, `server`, `client`:
 
-Để chạy kiểm tra chuyên sâu lõi HUDP và các thuật toán mã hóa (không cần bật Server/Client):
+```
+# Terminal 1: Khởi chạy Server
+python -m server.main
 
-``` bash
+# Terminal 2: Khởi chạy Client 1 (Web UI cổng 8081)
+python -m client.main 8081
+
+# Terminal 3: Khởi chạy Client 2 (Web UI cổng 8082)
+python -m client.main 8082
+
+```
+
+## 5. Kiểm thử Tự động (Unit Tests)
+
+Chạy bộ kiểm thử lõi giao thức (đóng gói packet, checksum, wrap-around 32-bit, out-of-order reassembly và mã hóa AES-GCM):
+
+```
 pytest tests/test_protocol.py -v
+
 ```
