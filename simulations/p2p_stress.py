@@ -31,19 +31,23 @@ class HeadlessClient:
             sender, filename = msg.get("from_user"), msg.get("filename")
             logger.info(f"[{self.username}] 📥 Tự động accept file '{filename}' từ {sender}.")
             
-            listen_port = self.fh.start_receiving(filename)
-            session_id = f"{listen_port}:{filename}"
+            # ĐÃ SỬA: Đón nhận cả listen_ip và listen_port từ file_handler
+            listen_ip, listen_port = self.fh.start_receiving(filename)
+            # Tạo session_id chuẩn xác với 3 thành phần: IP:Port:Filename
+            session_id = f"{listen_ip}:{listen_port}:{filename}"
             self.sm.send_json(FileAcceptResponse(to_user=sender, session_id=session_id))
             
         elif action == "SIGNAL_FILE_READY":
-            target_port, filename = msg.get("session_id").split(":", 1)
+            # ĐÃ SỬA: Bóc tách 3 thành phần từ session_id
+            target_ip, target_port, filename = msg.get("session_id").split(":", 2)
             filepath = self.pending_uploads.get(filename)
             
             if filepath:
-                logger.info(f"[{self.username}] 📤 Mở luồng P2P đẩy '{filename}' -> port {target_port}.")
+                logger.info(f"[{self.username}] 📤 Mở luồng P2P đẩy '{filename}' -> {target_ip}:{target_port}.")
                 threading.Thread(
                     target=self.fh.send_file,
-                    args=("127.0.0.1", int(target_port), filepath),
+                    # Truyền IP thực tế lấy được vào hàm send_file
+                    args=(target_ip, int(target_port), filepath),
                     daemon=True
                 ).start()
 
@@ -86,7 +90,6 @@ def wait_for_files(expected_files, timeout=30):
 def test_many_to_one():
     logger.info("\n" + "="*60 + "\n🚀 KỊCH BẢN 1: 4 SENDER ĐẨY FILE CHO 1 RECEIVER\n" + "="*60)
     
-    # Giảm size xuống 256KB để test flow nhanh hơn, không bị ngộp buffer
     file_size_kb = 256
     expected_size = file_size_kb * 1024
     expected_files = {}
@@ -109,7 +112,6 @@ def test_many_to_one():
         
     logger.info(f"\n⏳ Truyền 4 file P2P song song ({file_size_kb}KB/file)... Đang chờ tải hoàn tất.")
     
-    # Đợi động thay vì sleep chết
     if wait_for_files(expected_files, timeout=30):
         logger.info("✅ Cả 4 file đã được tải về thành công và đầy đủ dung lượng!")
     else:
@@ -152,7 +154,7 @@ def test_mutual_transfer():
 
 if __name__ == "__main__":
     clear_screen()
-    logger.info("BẮT ĐẦU P2P STRESS TEST (PHIÊN BẢN ĐÃ FIX TREO)...")
+    logger.info("BẮT ĐẦU P2P STRESS TEST (PHIÊN BẢN ĐÃ FIX TREO & MẠNG LAN)...")
 
     logger.info("[Hệ thống] Đang tự động bật Server tại 0.0.0.0:9000...")
     threading.Thread(target=start_server, daemon=True).start()

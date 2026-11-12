@@ -1,4 +1,5 @@
 import threading
+import time
 
 # Giả sử bạn có các class này từ thư mục dự án
 from shared.constants import TCPFlags
@@ -6,6 +7,7 @@ from shared.packet import Packet
 from shared.packet_service import PacketService
 from shared.exceptions import ConnectionTimeoutError
 from shared.security import SecureStream
+from shared.algorithms import MAX_SEQ
 
 
 class StreamManager:
@@ -20,7 +22,7 @@ class StreamManager:
 
         # Bảng định tuyến nội bộ: map từ (IP, Port) -> instance của PacketService
         self.connections = {}
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.channels = {} 
 
     def set_router(self, router):
@@ -39,19 +41,38 @@ class StreamManager:
             # Ném datagram cho lớp TCP (PacketService) bên dưới xử lý
             svc.feed_datagram(raw_data, addr)
         else:
-            # Phân tích SYN nếu là khách lạ
+            # Phân tích gói lạ
             try:
                 packet, _ = Packet.unpack(raw_data)
-                if packet.flags & TCPFlags.SYN:
-                    self._accept_new_connection(addr, packet)
-                else:
-                    print(f"[StreamManager] Bỏ qua gói tin không phải SYN từ khách lạ {addr}")
+                
+                # CHỐNG LỖI MUX/DEMUX:
+                # 1. Nếu không phải gói SYN thuần túy -> Bỏ qua lặng lẽ (chống quét port / DDoS rác)
+                if not (packet.flags & TCPFlags.SYN) or (packet.flags & TCPFlags.ACK):
+                    return
+                    
+                # 2. Xử lý SYN (Bắt tay mới)
+                self._accept_new_connection(addr, packet)
+                
             except Exception:
-                pass
+                pass # Lặng lẽ nuốt lỗi giải nén (sai checksum)
 
     def _accept_new_connection(self, addr: tuple, syn_packet: Packet):
-        print(f"[StreamManager] Đang thiết lập kết nối với {addr}...")
-        from server.config import PORT
+        from server.config import PORT, MAX_CLIENTS
+        
+        # CHỐNG LỖI MUX/DEMUX: Bảo vệ Max Connections
+        with self.lock:
+            if len(self.connections) >= MAX_CLIENTS:
+                # Trả RST báo bận
+                rst = Packet(
+                    src_port=PORT, dst_port=syn_packet.src_port,
+                    seq_num=syn_packet.ack_num, ack_num=0,
+                    flags=TCPFlags.RST, window_size=0
+                )
+                try:
+                    self.sock.sendto(rst.pack(), addr)
+                except OSError:
+                    pass
+                return
 
         # 1. Khởi tạo PacketService cho Server PHẢI CÓ đầy đủ Port
         svc = PacketService(
@@ -69,7 +90,7 @@ class StreamManager:
                 src_port=PORT,
                 dst_port=addr[1],
                 seq_num=local_seq,
-                ack_num=syn_packet.seq_num + 1,
+                ack_num=(syn_packet.seq_num + 1) % MAX_SEQ, # Chống lỗi wrap-around 32-bit
                 window_size=65535,
             )
 
@@ -84,25 +105,31 @@ class StreamManager:
 
         # 3. Kích hoạt kết nối phía Server
         try:
-            # Hãy truyền các tham số đúng với hàm establish_server_side mà bạn đã code
-            # (Bạn có thể cần thêm tham số peer_window=syn_packet.window_size nếu hàm yêu cầu)
+            # Truyền các tham số đúng với hàm establish_server_side
             svc.establish_server_side(
                 peer_address=addr,
                 peer_port=addr[1],
-                local_next_seq=local_seq + 1,
-                peer_next_seq=syn_packet.seq_num + 1,
+                local_next_seq=(local_seq + 1) % MAX_SEQ,
+                peer_next_seq=(syn_packet.seq_num + 1) % MAX_SEQ,
                 peer_window=syn_packet.window_size,
             )
         except Exception as e:
             print(f"[StreamManager] Lỗi establish: {e}")
+            return
 
         # 4. Lưu lại session và bật luồng lắng nghe
         chan = SecureStream(svc, is_server=True, psk=b"HUDP_SECRET_KEY")
         with self.lock:
+            # CHỐNG LỖI MUX/DEMUX: Xóa luồng cũ nếu Client crash rồi khởi động lại ngay lập tức trùng IP/Port
+            if addr in self.connections:
+                old_svc = self.connections.pop(addr)
+                try:
+                    old_svc.close(timeout=0)
+                except:
+                    pass
+                    
             self.connections[addr] = svc
             self.channels[addr] = chan
-
-        import threading
 
         threading.Thread(
             target=self._client_read_worker,
@@ -120,16 +147,13 @@ class StreamManager:
         Chờ lấy data hoàn chỉnh từ PacketService và ném cho Router.
         """
         try:
-            print(f"[StreamManager] Đang bắt tay bảo mật với {addr}...")
             chan.handshake(timeout=10) 
-            print(f"[StreamManager] Bắt tay bảo mật thành công với {addr}!")
             while True:
                 # Hàm này sẽ block chờ tới khi có 1 chunk dữ liệu IN-ORDER
                 data = chan.recv_message()
 
                 if data is None:
                     # Nhận được cờ FIN từ Client -> Đóng kết nối an toàn (EOF)
-                    print(f"[StreamManager] Client {addr} đóng kết nối (EOF).")
                     break
 
                 if data and self.router:
@@ -138,11 +162,11 @@ class StreamManager:
                     self.router.process_message(sender_address=addr, payload=data)
 
         except ConnectionTimeoutError:
-            print(f"[StreamManager] Mất kết nối mạng hoặc Timeout với {addr}")
+            pass # Lặng lẽ đóng
         except ConnectionResetError:
-            print(f"[StreamManager] Client {addr} ngắt kết nối đột ngột (RST)")
-        except Exception as e:
-            print(f"[StreamManager] Lỗi luồng đọc {addr}: {e}")
+            pass # Lặng lẽ đóng
+        except Exception:
+            pass # Lặng lẽ đóng
         finally:
             # Bất kể đóng an toàn hay rớt mạng, luôn dọn dẹp rác
             self._cleanup_connection(addr, chan)
@@ -158,30 +182,30 @@ class StreamManager:
             chan = self.channels.get(addr)
 
         if chan:
-            import threading
             threading.Thread(
                 target=self._async_send_worker, 
                 args=(chan, addr, data), 
                 daemon=True
             ).start()
         else:
-            print(f"[StreamManager] Không tìm thấy connection của {addr} để gửi.")
+            pass
 
     # ==========================================
     # 4. DỌN DẸP
     # ==========================================
-    def _cleanup_connection(self, addr: tuple, svc: PacketService):
+    def _cleanup_connection(self, addr: tuple, chan: SecureStream):
         """Dọn dẹp hệ thống khi Client rời đi"""
-        # 1. Báo cho PacketService đóng luồng nội bộ (nếu chưa đóng)
-        try:
-            svc.close(timeout=0.1)
-        except:
-            pass
-
-        # 2. Xóa khỏi StreamManager
+        # 1. Xóa khỏi StreamManager để không ai gửi tin tới nữa
         with self.lock:
-            self.connections.pop(addr, None)
-            chan = self.channels.pop(addr, None)
+            svc = self.connections.pop(addr, None)
+            chan_in_dict = self.channels.pop(addr, None)
+
+        # 2. Báo cho PacketService đóng luồng nội bộ (nếu chưa đóng)
+        if svc:
+            try:
+                svc.close(timeout=0.1)
+            except:
+                pass
 
         if chan:
             try:
@@ -192,16 +216,15 @@ class StreamManager:
         # 3. Báo cho StateManager "Đăng xuất" user này để user khác biết
         logged_out_user = self.state_manager.logout_by_address(addr)
         if logged_out_user:
-            print(f"[StreamManager] Đã dọn dẹp xong session của user '{logged_out_user}'.")
-            
-            # --- THÊM MỚI: BÁO CHO CÁC CLIENT KHÁC CẬP NHẬT LẠI DANH SÁCH ---
+            # --- BÁO CHO CÁC CLIENT KHÁC CẬP NHẬT LẠI DANH SÁCH ---
             all_users = self.state_manager.get_all_users_online()
             import json
             update_bytes = json.dumps({"action": "USER_LIST", "users": all_users}).encode('utf-8')
             
-            active_channels = list(self.channels.keys()) 
+            with self.lock:
+                active_channels = list(self.channels.keys()) 
+            
             for target_addr in active_channels:
-                # Dùng lại cơ chế fire-and-forget của hàm send_to đã fix
                 self.send_to(target_addr, update_bytes)
 
     def _async_send_worker(self, chan, addr, data):
@@ -210,6 +233,7 @@ class StreamManager:
             # gửi và chờ ACK. (Chỉ block luồng ngầm này, không block Server)
             chan.send_message(data)
         except Exception as e:
-            err_msg = str(e)
-            if "chưa được thiết lập" not in err_msg and "CLOSED" not in err_msg:
+            err_msg = str(e).lower()
+            # Ẩn hoàn toàn các lỗi liên quan đến việc peer ngắt kết nối khi đang gửi dở
+            if "chưa được thiết lập" not in err_msg and "closed" not in err_msg and "đóng" not in err_msg and "failed" not in err_msg:
                 print(f"[StreamManager] Lỗi gửi data tới {addr}: {e}")
