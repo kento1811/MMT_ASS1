@@ -33,8 +33,16 @@ class FileHandler:
             args=(sock, local_port, filename),
             daemon=True
         ).start()
-        
-        return local_port
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(('8.8.8.8', 1))
+            local_ip = s.getsockname()[0]
+        except Exception:
+            local_ip = '127.0.0.1'
+        finally:
+            s.close()
+
+        return local_ip, local_port
 
     def _receive_file_worker(self, sock: socket.socket, local_port: int, filename: str):
         print(f"\n[File] Đang chờ người gửi kết nối P2P tại port {local_port}...\n> ", end="")

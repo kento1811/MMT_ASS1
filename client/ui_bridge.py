@@ -57,7 +57,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                 try:
                     self.wfile.write(f.read())
                 except ConnectionAbortedError:
-                    pass # Bỏ qua lỗi 10053 khi F5 trình duyệt
+                    pass  # Bỏ qua lỗi 10053 khi F5 trình duyệt
                 except Exception:
                     pass
         else:
@@ -136,11 +136,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             filename = payload.get("filename")
 
             # Khởi động P2P Listener
-            listen_port = fh.start_receiving(filename)
-            session_id = f"{listen_port}:{filename}"
+            listen_ip, listen_port = fh.start_receiving(filename)
+            session_id = f"{listen_ip}:{listen_port}:{filename}"
             sm.send_json(FileAcceptResponse(to_user=to_user, session_id=session_id))
             MESSAGE_QUEUE.put(
-                {"action": "SYSTEM", "msg": f"Đang mở luồng P2P nhận '{filename}'..."}
+                {"action": "SYSTEM", "msg": f"Đang mở luồng P2P nhận '{filename}' tại {listen_ip}:{listen_port}..."}
             )
 
         elif cmd == "reject":
