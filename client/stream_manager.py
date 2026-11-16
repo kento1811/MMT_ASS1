@@ -14,6 +14,7 @@ class ClientStreamManager:
         self.is_connected = False
         self.chan = None
 
+    # Method kết nối với Backend qua 3-way handshake
     def connect(self) -> bool:
         if not self.sock:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -21,6 +22,7 @@ class ClientStreamManager:
         local_port = self.sock.getsockname()[1]
         
         print(f"Đang chạy Client tại port {local_port}...")
+        # Tạo agent xử lý packet đại diện client
         self.svc = PacketService(
             sock=self.sock,
             shared_socket=False, 

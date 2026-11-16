@@ -36,7 +36,7 @@ class ChatHandler:
             res = GeneralResponse(status="ok", message="Đăng nhập thành công!")
             self._send_to_client(sender_address, res)
             
-            # --- THÊM MỚI: Broadcast danh sách user khi có người mới vào ---
+            # Broadcast danh sách user khi có người mới vào 
             all_users = self.state_manager.get_all_users_online()
             update_msg = {"action": "USER_LIST", "users": all_users}
             

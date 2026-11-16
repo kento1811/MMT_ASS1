@@ -1,7 +1,7 @@
 import threading
 import time
 
-# Giả sử bạn có các class này từ thư mục dự án
+from server.config import PORT, MAX_CLIENTS
 from shared.constants import TCPFlags
 from shared.packet import Packet
 from shared.packet_service import PacketService
@@ -18,7 +18,7 @@ class StreamManager:
         """
         self.state_manager = state_manager
         self.sock = udp_socket
-        self.router = None  # Sẽ được set thông qua dependency injection
+        self.router = None 
 
         # Bảng định tuyến nội bộ: map từ (IP, Port) -> instance của PacketService
         self.connections = {}
@@ -57,7 +57,6 @@ class StreamManager:
                 pass # Lặng lẽ nuốt lỗi giải nén (sai checksum)
 
     def _accept_new_connection(self, addr: tuple, syn_packet: Packet):
-        from server.config import PORT, MAX_CLIENTS
         
         # CHỐNG LỖI MUX/DEMUX: Bảo vệ Max Connections
         with self.lock:

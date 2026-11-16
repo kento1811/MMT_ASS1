@@ -29,7 +29,7 @@ class HeadlessClient:
         
         if action == "INCOMING_FILE_REQ":
             sender, filename = msg.get("from_user"), msg.get("filename")
-            logger.info(f"[{self.username}] 📥 Tự động accept file '{filename}' từ {sender}.")
+            logger.info(f"[{self.username}]  Tự động accept file '{filename}' từ {sender}.")
             
             # ĐÃ SỬA: Đón nhận cả listen_ip và listen_port từ file_handler
             listen_ip, listen_port = self.fh.start_receiving(filename)
@@ -43,7 +43,7 @@ class HeadlessClient:
             filepath = self.pending_uploads.get(filename)
             
             if filepath:
-                logger.info(f"[{self.username}] 📤 Mở luồng P2P đẩy '{filename}' -> {target_ip}:{target_port}.")
+                logger.info(f"[{self.username}] Mở luồng P2P đẩy '{filename}' -> {target_ip}:{target_port}.")
                 threading.Thread(
                     target=self.fh.send_file,
                     # Truyền IP thực tế lấy được vào hàm send_file
@@ -88,7 +88,7 @@ def wait_for_files(expected_files, timeout=30):
     return False
 
 def test_many_to_one():
-    logger.info("\n" + "="*60 + "\n🚀 KỊCH BẢN 1: 4 SENDER ĐẨY FILE CHO 1 RECEIVER\n" + "="*60)
+    logger.info("\n" + "="*60 + "\n KỊCH BẢN 1: 4 SENDER ĐẨY FILE CHO 1 RECEIVER\n" + "="*60)
     
     file_size_kb = 256
     expected_size = file_size_kb * 1024
@@ -110,18 +110,18 @@ def test_many_to_one():
     for i, s in enumerate(senders):
         s.send_file("TargetBob", f"test_payload_{i+1}.bin")
         
-    logger.info(f"\n⏳ Truyền 4 file P2P song song ({file_size_kb}KB/file)... Đang chờ tải hoàn tất.")
+    logger.info(f"\n Truyền 4 file P2P song song ({file_size_kb}KB/file)... Đang chờ tải hoàn tất.")
     
     if wait_for_files(expected_files, timeout=30):
-        logger.info("✅ Cả 4 file đã được tải về thành công và đầy đủ dung lượng!")
+        logger.info(" Cả 4 file đã được tải về thành công và đầy đủ dung lượng!")
     else:
-        logger.error("❌ Hết thời gian chờ 30s, một số file tải không thành công.")
+        logger.error(" Hết thời gian chờ 30s, một số file tải không thành công.")
     
     receiver.close()
     for s in senders: s.close()
         
 def test_mutual_transfer():
-    logger.info("\n" + "="*60 + "\n🚀 KỊCH BẢN 2: 2 CLIENT TRUYỀN P2P FULL-DUPLEX\n" + "="*60)
+    logger.info("\n" + "="*60 + "\n KỊCH BẢN 2: 2 CLIENT TRUYỀN P2P FULL-DUPLEX\n" + "="*60)
     
     file_size_kb = 256
     expected_size = file_size_kb * 1024
@@ -142,12 +142,12 @@ def test_mutual_transfer():
     alice.send_file("Bob", "alice_to_bob.bin")
     bob.send_file("Alice", "bob_to_alice.bin")
     
-    logger.info("\n⏳ Truyền P2P 2 chiều... Đang chờ tải hoàn tất.")
+    logger.info("\n Truyền P2P 2 chiều... Đang chờ tải hoàn tất.")
     
     if wait_for_files(expected_files, timeout=25):
-        logger.info("✅ Cả 2 chiều (Alice <-> Bob) đã tải xong đầy đủ dung lượng!")
+        logger.info(" Cả 2 chiều (Alice <-> Bob) đã tải xong đầy đủ dung lượng!")
     else:
-        logger.error("❌ Hết thời gian chờ, một số file tải không thành công.")
+        logger.error(" Hết thời gian chờ, một số file tải không thành công.")
     
     alice.close()
     bob.close()
@@ -161,15 +161,15 @@ if __name__ == "__main__":
     time.sleep(1)
     
     cleanup_artifacts()
-    logger.info("🧹 Đã dọn dẹp workspace trước khi test.")
+    logger.info(" Đã dọn dẹp workspace trước khi test.")
     
     try:
         test_many_to_one()
         time.sleep(2)
         test_mutual_transfer()
-        logger.info("\n✅ KẾT QUẢ: TOÀN BỘ KỊCH BẢN P2P ĐÃ HOÀN TẤT VÀ ĐƯỢC GHI LOG!")
+        logger.info("\n KẾT QUẢ: TOÀN BỘ KỊCH BẢN P2P ĐÃ HOÀN TẤT VÀ ĐƯỢC GHI LOG!")
     except Exception as e:
-        logger.error(f"\n❌ LỖI: {e}")
+        logger.error(f"\n LỖI: {e}")
     finally:
         cleanup_artifacts()
-        logger.info("🧹 Đã dọn dẹp artifacts sau khi test xong.")
+        logger.info(" Đã dọn dẹp artifacts sau khi test xong.")

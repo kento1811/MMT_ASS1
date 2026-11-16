@@ -2,6 +2,7 @@ import os
 import socket
 import threading
 import random
+from client.config import FILE_CHUNK_SIZE
 from shared.packet import Packet
 from shared.packet_service import PacketService
 from shared.constants import TCPFlags
@@ -91,17 +92,17 @@ class FileHandler:
                         # Cứ chờ tối đa 5s cho mỗi chunk
                         data = chan.recv_message(timeout=5.0) 
                         if data is None: # Nhận được cờ FIN -> EOF
-                            print(f"\n[File] ✅ Đã tải xong '{filename}'! Tổng: {received_bytes} bytes.\n> ", end="")
+                            print(f"\n[File] Đã tải xong '{filename}'! Tổng: {received_bytes} bytes.\n> ", end="")
                             break
                             
                         f.write(data)
                         received_bytes += len(data)
                         
                     except ConnectionTimeoutError:
-                        print(f"\n[File] ❌ Lỗi: Timeout khi đang tải '{filename}'.\n> ", end="")
+                        print(f"\n[File] Lỗi: Timeout khi đang tải '{filename}'.\n> ", end="")
                         break
                     except ConnectionResetError:
-                        print(f"\n[File] ❌ Lỗi: Người gửi ngắt kết nối.\n> ", end="")
+                        print(f"\n[File] Lỗi: Người gửi ngắt kết nối.\n> ", end="")
                         break
                         
             # 5. Dọn dẹp
@@ -144,7 +145,7 @@ class FileHandler:
             print(f"\n[File] Kết nối P2P thành công! Đang đẩy file...\n> ", end="")
             
             # Đọc file nhị phân và gửi theo từng Chunk 1024 bytes
-            chunk_size = 1024
+            chunk_size = FILE_CHUNK_SIZE
             sent_bytes = 0
             filename = os.path.basename(filepath)
 
@@ -169,10 +170,10 @@ class FileHandler:
                         "type": "upload"
                     })
                     
-            print(f"\n[File] ✅ Đã gửi xong '{filename}'! Tổng: {sent_bytes} bytes.\n> ", end="")
+            print(f"\n[File] Đã gửi xong '{filename}'! Tổng: {sent_bytes} bytes.\n> ", end="")
             svc.close(timeout=2)
             chan.close()
             sock.close()
             
         except Exception as e:
-            print(f"\n[File] ❌ Lỗi gửi file: {e}\n> ", end="")
+            print(f"\n[File] Lỗi gửi file: {e}\n> ", end="")

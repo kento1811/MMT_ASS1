@@ -5,6 +5,13 @@ from server.file_handler import FileHandler
 from server.stream_manager import StreamManager
 from shared.schemas import ClientMessage, ActionType, GeneralResponse
 
+
+"""
+Router làm nhiệm vụ điều phối sau khi nhận tin
+1. Kiểm tra định dạng gửi tới
+2. Kiểm tra action và điều phối tới File/Chat Manager xử lý
+3. Exception khi parse json lỗi
+"""
 class Router:
     def __init__(
         self,

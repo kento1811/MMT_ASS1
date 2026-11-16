@@ -14,14 +14,14 @@ class ChaosSocket(socket.socket):
     """Ghi đè (Override) phương thức sendto của OS để giả lập rớt gói"""
     def sendto(self, data, address):
         if random.random() < LOSS_RATE:
-            logger.warning(f"[Chaos] 💥 ĐÃ NUỐT 1 GÓI TIN bay tới {address[1]}! (Size: {len(data)} bytes)")
+            logger.warning(f"[Chaos]  ĐÃ NUỐT 1 GÓI TIN bay tới {address[1]}! (Size: {len(data)} bytes)")
             return len(data) 
         return super().sendto(data, address)
 
 def main():
     clear_screen()
     logger.info("="*70)
-    logger.info("🚀 BẮT ĐẦU BÀI TEST CHAOS ENGINEERING (TRÊN SOCKET THỰC TẾ)")
+    logger.info(" BẮT ĐẦU BÀI TEST CHAOS ENGINEERING (TRÊN SOCKET THỰC TẾ)")
     logger.info("="*70)
 
     # 1. Bật Server thật
@@ -38,12 +38,12 @@ def main():
     
     logger.info("[Hệ thống] Bắt đầu Connect (Cẩn thận, gói SYN có thể bị nuốt)...")
     if sm.connect():
-        logger.info("✅ [Client] Bắt tay 3 bước & ECDH thành công (Vượt qua bão Packet Loss)!\n")
+        logger.info(" [Client] Bắt tay 3 bước & ECDH thành công (Vượt qua bão Packet Loss)!\n")
         sm.send_json(LoginRequest(username="ChaosBot"))
         time.sleep(1)
 
         logger.info("-" * 70)
-        logger.info("🔥 BẮT ĐẦU SPAM DỮ LIỆU ĐỂ ÉP FAST RETRANSMIT VÀ RTO")
+        logger.info(" BẮT ĐẦU SPAM DỮ LIỆU ĐỂ ÉP FAST RETRANSMIT VÀ RTO")
         logger.info("-" * 70)
         
         for i in range(1, 4):
@@ -51,11 +51,11 @@ def main():
             sm.send_json(BroadcastRequest(msg=msg))
             time.sleep(0.5)
 
-        logger.info("\n⏳ Đang chờ hệ thống tự động gửi lại (Retransmit) các gói bị nuốt...")
+        logger.info("\n Đang chờ hệ thống tự động gửi lại (Retransmit) các gói bị nuốt...")
         time.sleep(5) 
 
         logger.info("\n" + "-" * 70)
-        logger.info("💀 TEST RÚT CÁP ĐỘT NGỘT (DIRTY DISCONNECT)")
+        logger.info(" TEST RÚT CÁP ĐỘT NGỘT (DIRTY DISCONNECT)")
         logger.info("-" * 70)
         logger.info("[Hệ thống] Bóp chết socket của Client đột ngột mà không gửi cờ FIN...")
         
@@ -63,12 +63,12 @@ def main():
         sm.sock.close() 
         sm.is_connected = False
         
-        logger.info("⏳ Chờ Server nhận ra client bốc hơi (thông qua Keepalive/Idle Timeout)...")
+        logger.info(" Chờ Server nhận ra client bốc hơi (thông qua Keepalive/Idle Timeout)...")
         time.sleep(5)
         
-        logger.info("\n✅ HOÀN TẤT KỊCH BẢN THỰC CHIẾN!")
+        logger.info("\n HOÀN TẤT KỊCH BẢN THỰC CHIẾN!")
     else:
-        logger.error("❌ [Client] Kết nối thất bại do xui xẻo rớt sạch gói SYN/SYN-ACK.")
+        logger.error(" [Client] Kết nối thất bại do xui xẻo rớt sạch gói SYN/SYN-ACK.")
 
 if __name__ == "__main__":
     main()
